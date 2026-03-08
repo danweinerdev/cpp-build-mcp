@@ -248,6 +248,13 @@ func TestBuildConfigureArgs(t *testing.T) {
 
 		assertContainsSequence(t, args, "--preset", "debug")
 		assertContains(t, args, "--extra")
+
+		// --extra should come after --preset
+		presetIdx := indexOf(args, "--preset")
+		extraIdx := indexOf(args, "--extra")
+		if presetIdx >= extraIdx {
+			t.Fatalf("--preset (index %d) should appear before --extra (index %d)", presetIdx, extraIdx)
+		}
 	})
 
 	t.Run("cmake args and extra args are appended", func(t *testing.T) {

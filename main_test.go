@@ -1699,6 +1699,11 @@ func TestMultiConfigPresetFieldIntegration(t *testing.T) {
 		t.Fatalf("handleConfigure tool error: %s", extractText(t, configResult))
 	}
 
+	// Verify release builder was NOT called.
+	if releaseFB.lastConfigureArgs != nil {
+		t.Fatal("release builder Configure() was called when routing to debug")
+	}
+
 	// Re-check list_configs: debug should now be configured, release should
 	// remain unconfigured — proving configure dispatched to the debug builder.
 	listReq2 := makeCallToolRequest(nil)
