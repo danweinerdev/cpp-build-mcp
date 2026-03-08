@@ -1,5 +1,5 @@
 # Binary
-cpp-build-mcp
+bin/
 
 # Build artifacts
 testdata/cmake/build/
