@@ -541,6 +541,8 @@ func (b *blockingFakeBuilder) Clean(_ context.Context, _ []string) (*builder.Bui
 	return &builder.BuildResult{}, nil
 }
 
+func (b *blockingFakeBuilder) SetDirty(dirty bool) {}
+
 func TestE2EHealthResource(t *testing.T) {
 	fb := &fakeBuilder{
 		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},

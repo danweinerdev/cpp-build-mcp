@@ -71,6 +71,8 @@ func (f *fakeBuilder) Clean(_ context.Context, targets []string) (*builder.Build
 	return &builder.BuildResult{}, nil
 }
 
+func (f *fakeBuilder) SetDirty(dirty bool) {}
+
 // newTestServer creates an mcpServer with a fakeBuilder and fresh state store.
 func newTestServer(fb *fakeBuilder) *mcpServer {
 	cfg := &config.Config{

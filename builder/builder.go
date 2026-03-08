@@ -23,6 +23,7 @@ type Builder interface {
 	Configure(ctx context.Context, args []string) (*BuildResult, error)
 	Build(ctx context.Context, targets []string, jobs int) (*BuildResult, error)
 	Clean(ctx context.Context, targets []string) (*BuildResult, error)
+	SetDirty(dirty bool)
 }
 
 // NewBuilder creates a Builder for the given configuration. The generator

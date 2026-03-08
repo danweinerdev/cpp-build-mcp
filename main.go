@@ -218,12 +218,7 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 	// If the state is dirty, set the builder's dirty flag so it cleans first.
 	wasDirty := srv.store.IsDirty()
 	if wasDirty {
-		switch b := srv.builder.(type) {
-		case *builder.CMakeBuilder:
-			b.SetDirty(true)
-		case *builder.MakeBuilder:
-			b.SetDirty(true)
-		}
+		srv.builder.SetDirty(true)
 	}
 
 	// Extract optional targets parameter.
