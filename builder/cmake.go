@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/danweinerdev/cpp-build-mcp/config"
@@ -111,6 +112,11 @@ func (b *CMakeBuilder) buildCleanArgs() []string {
 // run executes a command, captures stdout and stderr, measures duration, and
 // returns a BuildResult. It extracts the exit code from exec.ExitError when
 // the command fails with a non-zero exit.
+//
+// When the context is cancelled or times out, the command receives SIGTERM
+// first (via cmd.Cancel). If the process does not exit within 3 seconds,
+// Go sends SIGKILL automatically (via cmd.WaitDelay). The returned
+// BuildResult has Killed=true when the process was terminated this way.
 func (b *CMakeBuilder) run(ctx context.Context, name string, args []string) (*BuildResult, error) {
 	var stdout, stderr bytes.Buffer
 
@@ -118,9 +124,22 @@ func (b *CMakeBuilder) run(ctx context.Context, name string, args []string) (*Bu
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	// Graceful shutdown: send SIGTERM on context cancellation, then SIGKILL
+	// after WaitDelay if the process has not exited.
+	cmd.Cancel = func() error {
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
+	cmd.WaitDelay = 3 * time.Second
+
 	start := time.Now()
 	err := cmd.Run()
 	duration := time.Since(start)
+
+	killed := false
+	if err != nil && ctx.Err() != nil {
+		// The context was cancelled or timed out — the process was killed.
+		killed = true
+	}
 
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -130,6 +149,16 @@ func (b *CMakeBuilder) run(ctx context.Context, name string, args []string) (*Bu
 				Stdout:   stdout.String(),
 				Stderr:   stderr.String(),
 				Duration: duration,
+				Killed:   killed,
+			}, nil
+		}
+		if killed {
+			return &BuildResult{
+				ExitCode: -1,
+				Stdout:   stdout.String(),
+				Stderr:   stderr.String(),
+				Duration: duration,
+				Killed:   true,
 			}, nil
 		}
 		return nil, err

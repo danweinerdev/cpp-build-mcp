@@ -15,6 +15,7 @@ type BuildResult struct {
 	Stdout   string
 	Stderr   string
 	Duration time.Duration
+	Killed   bool // true if the subprocess was killed due to timeout/cancellation
 }
 
 // Builder is the interface that all build system backends must implement.

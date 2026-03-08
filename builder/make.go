@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/danweinerdev/cpp-build-mcp/config"
@@ -137,6 +138,11 @@ func setEnvVar(env []string, key, value string) []string {
 
 // runMake executes the make command with the given arguments, captures stdout
 // and stderr, measures duration, and returns a BuildResult.
+//
+// When the context is cancelled or times out, the command receives SIGTERM
+// first (via cmd.Cancel). If the process does not exit within 3 seconds,
+// Go sends SIGKILL automatically (via cmd.WaitDelay). The returned
+// BuildResult has Killed=true when the process was terminated this way.
 func (b *MakeBuilder) runMake(ctx context.Context, args []string) (*BuildResult, error) {
 	var stdout, stderr bytes.Buffer
 
@@ -145,9 +151,22 @@ func (b *MakeBuilder) runMake(ctx context.Context, args []string) (*BuildResult,
 	cmd.Stderr = &stderr
 	cmd.Env = b.buildEnv()
 
+	// Graceful shutdown: send SIGTERM on context cancellation, then SIGKILL
+	// after WaitDelay if the process has not exited.
+	cmd.Cancel = func() error {
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
+	cmd.WaitDelay = 3 * time.Second
+
 	start := time.Now()
 	err := cmd.Run()
 	duration := time.Since(start)
+
+	killed := false
+	if err != nil && ctx.Err() != nil {
+		// The context was cancelled or timed out — the process was killed.
+		killed = true
+	}
 
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -157,6 +176,16 @@ func (b *MakeBuilder) runMake(ctx context.Context, args []string) (*BuildResult,
 				Stdout:   stdout.String(),
 				Stderr:   stderr.String(),
 				Duration: duration,
+				Killed:   killed,
+			}, nil
+		}
+		if killed {
+			return &BuildResult{
+				ExitCode: -1,
+				Stdout:   stdout.String(),
+				Stderr:   stderr.String(),
+				Duration: duration,
+				Killed:   true,
 			}, nil
 		}
 		return nil, err
