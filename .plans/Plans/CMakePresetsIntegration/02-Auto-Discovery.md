@@ -3,18 +3,18 @@ title: "Auto-Discovery"
 type: phase
 plan: CMakePresetsIntegration
 phase: 2
-status: planned
+status: in-progress
 created: 2026-03-08
 updated: 2026-03-08
 deliverable: "Zero-config auto-discovery of build configurations from CMakePresets.json; LoadMulti populates registry from presets when no .cpp-build-mcp.json configs map exists"
 tasks:
   - id: "2.1"
     title: "Parse CMakePresets.json configurePresets"
-    status: planned
+    status: complete
     verification: "Valid CMakePresets.json with configurePresets array parses into presetMetadata slice. Missing file returns nil slice without error. Invalid JSON returns error. Schema version field is read (no version-specific behavior needed — only configurePresets is read, which exists in all versions). Each preset's name, binaryDir, generator, hidden, and inherits fields are extracted. Include field (v4+) is parsed for later warning detection. Presets with no configurePresets key return empty slice."
   - id: "2.2"
     title: "Inherits resolution and macro expansion"
-    status: planned
+    status: in-progress
     depends_on: ["2.1"]
     verification: "Preset inheriting binaryDir from a hidden base preset resolves correctly. Multi-level inherits (A inherits B inherits C) resolves transitively. Multi-inheritance via array uses first non-empty value for each field. Child preset with own binaryDir keeps it (parent's binaryDir ignored). Circular inherits detected and returns error naming the cycle. ${sourceDir} expands to the dir argument. ${presetName} expands to the preset's name. Relative binaryDir (no ${sourceDir} prefix) joined with dir via filepath.Join. Preset with $env{} macro in binaryDir skipped with slog.Warn. go test -race passes."
   - id: "2.3"

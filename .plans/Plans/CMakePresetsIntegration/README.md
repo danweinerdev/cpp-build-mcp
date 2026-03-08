@@ -13,7 +13,7 @@ phases:
     doc: "01-Preset-Pass-Through.md"
   - id: 2
     title: "Auto-Discovery"
-    status: planned
+    status: in-progress
     doc: "02-Auto-Discovery.md"
     depends_on: [1]
   - id: 3

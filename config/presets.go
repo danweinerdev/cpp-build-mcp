@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // presetMetadata holds the minimal data cpp-build-mcp needs from a CMake
@@ -56,4 +58,107 @@ func readPresetsFile(path string) (*presetsFile, error) {
 	}
 
 	return &pf, nil
+}
+
+// parseInherits parses the Inherits field of a configurePreset. The CMake spec
+// allows it to be either a single string or an array of strings.
+// If raw is nil or empty, it returns nil (no parents).
+func parseInherits(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return []string{s}, nil
+	}
+
+	var arr []string
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		return arr, nil
+	}
+
+	return nil, fmt.Errorf("inherits: expected string or []string, got %s", string(raw))
+}
+
+// resolveInherits walks the inherits chains for all presets and copies
+// BinaryDir and Generator from parent presets when the child has empty values.
+// For multiple parents (array form), the first non-empty value wins
+// (left-to-right precedence). The slice is modified in-place and returned.
+//
+// Circular inherits chains are detected and cause an error to be returned.
+func resolveInherits(presets []configurePreset) ([]configurePreset, error) {
+	byName := make(map[string]int, len(presets))
+	for i, p := range presets {
+		byName[p.Name] = i
+	}
+
+	resolved := make([]bool, len(presets))
+	inStack := make([]bool, len(presets))
+
+	var resolve func(idx int) error
+	resolve = func(idx int) error {
+		if resolved[idx] {
+			return nil
+		}
+		if inStack[idx] {
+			return fmt.Errorf("circular inherits involving %q", presets[idx].Name)
+		}
+		inStack[idx] = true
+
+		parents, err := parseInherits(presets[idx].Inherits)
+		if err != nil {
+			return err
+		}
+
+		for _, parentName := range parents {
+			pi, ok := byName[parentName]
+			if !ok {
+				continue // unknown parent — skip silently
+			}
+			if err := resolve(pi); err != nil {
+				return err
+			}
+			if presets[idx].BinaryDir == "" {
+				presets[idx].BinaryDir = presets[pi].BinaryDir
+			}
+			if presets[idx].Generator == "" {
+				presets[idx].Generator = presets[pi].Generator
+			}
+		}
+
+		inStack[idx] = false
+		resolved[idx] = true
+		return nil
+	}
+
+	for i := range presets {
+		if err := resolve(i); err != nil {
+			return nil, err
+		}
+	}
+	return presets, nil
+}
+
+// expandBinaryDir replaces macros in binaryDir and normalizes the resulting
+// path. The supported macros are ${sourceDir} and ${presetName}. If the
+// expanded result still contains unresolved macros (${...} or $env{...}), an
+// error is returned. If the expanded path is relative, it is joined with dir.
+func expandBinaryDir(binaryDir, dir, presetName string) (string, error) {
+	if binaryDir == "" {
+		return "", nil
+	}
+
+	expanded := strings.ReplaceAll(binaryDir, "${sourceDir}", dir)
+	expanded = strings.ReplaceAll(expanded, "${presetName}", presetName)
+
+	if strings.Contains(expanded, "${") || strings.Contains(expanded, "$env{") {
+		return "", fmt.Errorf("unresolvable macro in binaryDir %q (expanded: %q)", binaryDir, expanded)
+	}
+
+	if !filepath.IsAbs(expanded) {
+		expanded = filepath.Join(dir, expanded)
+	}
+
+	return expanded, nil
 }

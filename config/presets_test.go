@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -246,5 +247,189 @@ func TestReadPresetsFile(t *testing.T) {
 		}
 		assertEqual(t, "Inherits[0]", arr[0], "base1")
 		assertEqual(t, "Inherits[1]", arr[1], "base2")
+	})
+}
+
+func TestResolveInherits(t *testing.T) {
+	t.Run("single-level inherits", func(t *testing.T) {
+		presets := []configurePreset{
+			{Name: "child", Inherits: json.RawMessage(`"parent"`)},
+			{Name: "parent", BinaryDir: "/build/parent", Generator: "Ninja"},
+		}
+
+		result, err := resolveInherits(presets)
+		if err != nil {
+			t.Fatalf("resolveInherits() returned error: %v", err)
+		}
+
+		assertEqual(t, "child.BinaryDir", result[0].BinaryDir, "/build/parent")
+		assertEqual(t, "child.Generator", result[0].Generator, "Ninja")
+	})
+
+	t.Run("multi-level inherits 3 deep", func(t *testing.T) {
+		presets := []configurePreset{
+			{Name: "a", Inherits: json.RawMessage(`"b"`)},
+			{Name: "b", Inherits: json.RawMessage(`"c"`)},
+			{Name: "c", BinaryDir: "/build/c", Generator: "Ninja"},
+		}
+
+		result, err := resolveInherits(presets)
+		if err != nil {
+			t.Fatalf("resolveInherits() returned error: %v", err)
+		}
+
+		assertEqual(t, "a.BinaryDir", result[0].BinaryDir, "/build/c")
+		assertEqual(t, "a.Generator", result[0].Generator, "Ninja")
+		assertEqual(t, "b.BinaryDir", result[1].BinaryDir, "/build/c")
+		assertEqual(t, "b.Generator", result[1].Generator, "Ninja")
+	})
+
+	t.Run("multi-parent array uses first non-empty value", func(t *testing.T) {
+		presets := []configurePreset{
+			{Name: "child", Inherits: json.RawMessage(`["parent1", "parent2"]`)},
+			{Name: "parent1", BinaryDir: "/build/p1"},
+			{Name: "parent2", BinaryDir: "/build/p2", Generator: "Ninja"},
+		}
+
+		result, err := resolveInherits(presets)
+		if err != nil {
+			t.Fatalf("resolveInherits() returned error: %v", err)
+		}
+
+		// BinaryDir from parent1 (first non-empty), Generator from parent2.
+		assertEqual(t, "child.BinaryDir", result[0].BinaryDir, "/build/p1")
+		assertEqual(t, "child.Generator", result[0].Generator, "Ninja")
+	})
+
+	t.Run("child overrides inherited values", func(t *testing.T) {
+		presets := []configurePreset{
+			{Name: "child", BinaryDir: "/build/child", Generator: "Make", Inherits: json.RawMessage(`"parent"`)},
+			{Name: "parent", BinaryDir: "/build/parent", Generator: "Ninja"},
+		}
+
+		result, err := resolveInherits(presets)
+		if err != nil {
+			t.Fatalf("resolveInherits() returned error: %v", err)
+		}
+
+		assertEqual(t, "child.BinaryDir", result[0].BinaryDir, "/build/child")
+		assertEqual(t, "child.Generator", result[0].Generator, "Make")
+	})
+
+	t.Run("circular detection", func(t *testing.T) {
+		presets := []configurePreset{
+			{Name: "a", Inherits: json.RawMessage(`"b"`)},
+			{Name: "b", Inherits: json.RawMessage(`"a"`)},
+		}
+
+		_, err := resolveInherits(presets)
+		if err == nil {
+			t.Fatal("resolveInherits() should have returned an error for circular inherits")
+		}
+		if !strings.Contains(err.Error(), "circular") {
+			t.Errorf("error should mention circular, got: %v", err)
+		}
+	})
+
+	t.Run("generator inherits from parent", func(t *testing.T) {
+		presets := []configurePreset{
+			{Name: "child", BinaryDir: "/build/child", Inherits: json.RawMessage(`"parent"`)},
+			{Name: "parent", Generator: "Ninja Multi-Config"},
+		}
+
+		result, err := resolveInherits(presets)
+		if err != nil {
+			t.Fatalf("resolveInherits() returned error: %v", err)
+		}
+
+		assertEqual(t, "child.BinaryDir", result[0].BinaryDir, "/build/child")
+		assertEqual(t, "child.Generator", result[0].Generator, "Ninja Multi-Config")
+	})
+
+	t.Run("no inherits field leaves preset unchanged", func(t *testing.T) {
+		presets := []configurePreset{
+			{Name: "standalone", BinaryDir: "/build/standalone", Generator: "Ninja"},
+		}
+
+		result, err := resolveInherits(presets)
+		if err != nil {
+			t.Fatalf("resolveInherits() returned error: %v", err)
+		}
+
+		assertEqual(t, "standalone.BinaryDir", result[0].BinaryDir, "/build/standalone")
+		assertEqual(t, "standalone.Generator", result[0].Generator, "Ninja")
+	})
+
+	t.Run("unknown parent is skipped silently", func(t *testing.T) {
+		presets := []configurePreset{
+			{Name: "child", Inherits: json.RawMessage(`"nonexistent"`)},
+		}
+
+		result, err := resolveInherits(presets)
+		if err != nil {
+			t.Fatalf("resolveInherits() returned error: %v", err)
+		}
+
+		assertEqual(t, "child.BinaryDir", result[0].BinaryDir, "")
+		assertEqual(t, "child.Generator", result[0].Generator, "")
+	})
+}
+
+func TestExpandBinaryDir(t *testing.T) {
+	t.Run("sourceDir macro expansion", func(t *testing.T) {
+		result, err := expandBinaryDir("${sourceDir}/build", "/src", "debug")
+		if err != nil {
+			t.Fatalf("expandBinaryDir() returned error: %v", err)
+		}
+		assertEqual(t, "expanded", result, "/src/build")
+	})
+
+	t.Run("presetName macro expansion", func(t *testing.T) {
+		result, err := expandBinaryDir("${sourceDir}/build/${presetName}", "/src", "debug")
+		if err != nil {
+			t.Fatalf("expandBinaryDir() returned error: %v", err)
+		}
+		assertEqual(t, "expanded", result, "/src/build/debug")
+	})
+
+	t.Run("relative path join", func(t *testing.T) {
+		result, err := expandBinaryDir("build/debug", "/src", "debug")
+		if err != nil {
+			t.Fatalf("expandBinaryDir() returned error: %v", err)
+		}
+		assertEqual(t, "expanded", result, "/src/build/debug")
+	})
+
+	t.Run("unresolvable macro returns error", func(t *testing.T) {
+		_, err := expandBinaryDir("${sourceDir}/build/$env{HOME}", "/src", "debug")
+		if err == nil {
+			t.Fatal("expandBinaryDir() should have returned an error for unresolvable macro")
+		}
+		if !strings.Contains(err.Error(), "unresolvable") {
+			t.Errorf("error should mention unresolvable, got: %v", err)
+		}
+	})
+
+	t.Run("empty binaryDir returns empty string", func(t *testing.T) {
+		result, err := expandBinaryDir("", "/src", "debug")
+		if err != nil {
+			t.Fatalf("expandBinaryDir() returned error: %v", err)
+		}
+		assertEqual(t, "expanded", result, "")
+	})
+
+	t.Run("absolute path stays absolute", func(t *testing.T) {
+		result, err := expandBinaryDir("/absolute/build", "/src", "debug")
+		if err != nil {
+			t.Fatalf("expandBinaryDir() returned error: %v", err)
+		}
+		assertEqual(t, "expanded", result, "/absolute/build")
+	})
+
+	t.Run("unknown dollar-brace macro returns error", func(t *testing.T) {
+		_, err := expandBinaryDir("${sourceDir}/build/${unknownMacro}", "/src", "debug")
+		if err == nil {
+			t.Fatal("expandBinaryDir() should have returned an error for unknown macro")
+		}
 	})
 }
