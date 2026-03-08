@@ -140,6 +140,13 @@ func startE2E(t *testing.T, fb *fakeBuilder) *e2eEnv {
 		srv.handleSuggestFix,
 	)
 
+	s.AddTool(
+		mcp.NewTool("list_configs",
+			mcp.WithDescription("List all available build configurations."),
+		),
+		srv.handleListConfigs,
+	)
+
 	s.AddResource(
 		mcp.NewResource("build://health", "Build Health",
 			mcp.WithResourceDescription("Build health summary"),

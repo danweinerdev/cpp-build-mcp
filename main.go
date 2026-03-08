@@ -75,6 +75,7 @@ func main() {
 	s.AddTool(
 		mcp.NewTool("build",
 			mcp.WithDescription("Build the C/C++ project using CMake."),
+			mcp.WithString("config", mcp.Description("Configuration name (omit for default)")),
 			mcp.WithArray("targets", mcp.WithStringItems(), mcp.Description("Build targets to compile. If empty, builds the default target.")),
 			mcp.WithNumber("jobs", mcp.Description("Number of parallel build jobs. 0 uses the build system default.")),
 		),
@@ -84,6 +85,7 @@ func main() {
 	s.AddTool(
 		mcp.NewTool("get_errors",
 			mcp.WithDescription("Get the current list of build errors from the last build."),
+			mcp.WithString("config", mcp.Description("Configuration name (omit for default)")),
 		),
 		srv.handleGetErrors,
 	)
@@ -91,6 +93,7 @@ func main() {
 	s.AddTool(
 		mcp.NewTool("get_warnings",
 			mcp.WithDescription("Get the current list of build warnings from the last build."),
+			mcp.WithString("config", mcp.Description("Configuration name (omit for default)")),
 			mcp.WithString("filter", mcp.Description("Optional case-insensitive substring filter applied to diagnostic code or file path.")),
 		),
 		srv.handleGetWarnings,
@@ -99,6 +102,7 @@ func main() {
 	s.AddTool(
 		mcp.NewTool("configure",
 			mcp.WithDescription("Run CMake configure step to generate the build system."),
+			mcp.WithString("config", mcp.Description("Configuration name (omit for default)")),
 			mcp.WithArray("cmake_args", mcp.WithStringItems(), mcp.Description("Additional CMake arguments to pass to the configure step.")),
 		),
 		srv.handleConfigure,
@@ -107,6 +111,7 @@ func main() {
 	s.AddTool(
 		mcp.NewTool("clean",
 			mcp.WithDescription("Clean build artifacts."),
+			mcp.WithString("config", mcp.Description("Configuration name (omit for default)")),
 			mcp.WithArray("targets", mcp.WithStringItems(), mcp.Description("Specific targets to clean. If empty, cleans all.")),
 		),
 		srv.handleClean,
@@ -115,6 +120,7 @@ func main() {
 	s.AddTool(
 		mcp.NewTool("get_changed_files",
 			mcp.WithDescription("Detect source files that have changed since the last successful build."),
+			mcp.WithString("config", mcp.Description("Configuration name (omit for default)")),
 		),
 		srv.handleGetChangedFiles,
 	)
@@ -122,6 +128,7 @@ func main() {
 	s.AddTool(
 		mcp.NewTool("get_build_graph",
 			mcp.WithDescription("Get a summary of the build graph from compile_commands.json."),
+			mcp.WithString("config", mcp.Description("Configuration name (omit for default)")),
 		),
 		srv.handleGetBuildGraph,
 	)
@@ -129,9 +136,17 @@ func main() {
 	s.AddTool(
 		mcp.NewTool("suggest_fix",
 			mcp.WithDescription("Get source context around a build error for fixing."),
+			mcp.WithString("config", mcp.Description("Configuration name (omit for default)")),
 			mcp.WithNumber("error_index", mcp.Description("Zero-based index into the error list from get_errors.")),
 		),
 		srv.handleSuggestFix,
+	)
+
+	s.AddTool(
+		mcp.NewTool("list_configs",
+			mcp.WithDescription("List all available build configurations and their current status."),
+		),
+		srv.handleListConfigs,
 	)
 
 	s.AddResource(
@@ -145,6 +160,12 @@ func main() {
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+// listConfigsResponse is the JSON structure returned by the list_configs tool.
+type listConfigsResponse struct {
+	Configs       []ConfigSummary `json:"configs"`
+	DefaultConfig string          `json:"default_config"`
 }
 
 // buildResponse is the JSON structure returned by the build tool.
@@ -226,6 +247,20 @@ func resolveToolchain(inst *configInstance) string {
 		}
 	}
 	return tc
+}
+
+func (srv *mcpServer) handleListConfigs(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	resp := listConfigsResponse{
+		Configs:       srv.registry.list(),
+		DefaultConfig: srv.registry.dflt,
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return mcp.NewToolResultError("failed to marshal response: " + err.Error()), nil
+	}
+
+	return mcp.NewToolResultText(string(data)), nil
 }
 
 func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

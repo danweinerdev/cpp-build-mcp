@@ -1336,6 +1336,92 @@ func TestParseFilesCompiledNinjaCacheHit(t *testing.T) {
 	}
 }
 
+// --- list_configs tests ---
+
+func TestListConfigsDefault(t *testing.T) {
+	srv, _ := newTestServer(&fakeBuilder{})
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleListConfigs(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp listConfigsResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.DefaultConfig != "default" {
+		t.Fatalf("expected default_config 'default', got %q", resp.DefaultConfig)
+	}
+	if len(resp.Configs) != 1 {
+		t.Fatalf("expected 1 config, got %d", len(resp.Configs))
+	}
+	if resp.Configs[0].Name != "default" {
+		t.Fatalf("expected config name 'default', got %q", resp.Configs[0].Name)
+	}
+	if resp.Configs[0].BuildDir != "build" {
+		t.Fatalf("expected build_dir 'build', got %q", resp.Configs[0].BuildDir)
+	}
+	if resp.Configs[0].Status != "unconfigured" {
+		t.Fatalf("expected status 'unconfigured', got %q", resp.Configs[0].Status)
+	}
+}
+
+func TestBuildWithExplicitConfigParam(t *testing.T) {
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	req := makeCallToolRequest(map[string]interface{}{"config": "default"})
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp buildResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.ExitCode != 0 {
+		t.Fatalf("expected exit_code 0, got %d", resp.ExitCode)
+	}
+}
+
+func TestBuildWithNonexistentConfig(t *testing.T) {
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	req := makeCallToolRequest(map[string]interface{}{"config": "nonexistent"})
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected tool error for nonexistent config")
+	}
+	text := extractText(t, result)
+	if !strings.Contains(text, "unknown configuration") {
+		t.Fatalf("expected 'unknown configuration' in error, got %q", text)
+	}
+	if !strings.Contains(text, "default") {
+		t.Fatalf("expected available config 'default' in error, got %q", text)
+	}
+}
+
 // extractText extracts the text content from a CallToolResult.
 func extractText(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()
