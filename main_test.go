@@ -1422,6 +1422,175 @@ func TestBuildWithNonexistentConfig(t *testing.T) {
 	}
 }
 
+// newMultiTestServer creates an mcpServer with multiple named fakeBuilder
+// instances. Each entry in configs maps a config name to a fakeBuilder.
+// The defaultName selects which config is the default.
+func newMultiTestServer(configs map[string]*fakeBuilder, defaultName string) *mcpServer {
+	registry := newConfigRegistry(defaultName)
+	for name, fb := range configs {
+		inst := &configInstance{
+			name:    name,
+			cfg:     &config.Config{BuildDir: "build/" + name},
+			builder: fb,
+			store:   state.NewStore(),
+		}
+		registry.add(inst)
+	}
+	return &mcpServer{registry: registry}
+}
+
+func TestMultiConfigListConfigs(t *testing.T) {
+	srv := newMultiTestServer(map[string]*fakeBuilder{
+		"debug":   {},
+		"release": {},
+	}, "debug")
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleListConfigs(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp listConfigsResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.DefaultConfig != "debug" {
+		t.Fatalf("expected default_config %q, got %q", "debug", resp.DefaultConfig)
+	}
+	if len(resp.Configs) != 2 {
+		t.Fatalf("expected 2 configs, got %d", len(resp.Configs))
+	}
+
+	// Configs should be sorted alphabetically.
+	if resp.Configs[0].Name != "debug" {
+		t.Fatalf("expected first config name %q, got %q", "debug", resp.Configs[0].Name)
+	}
+	if resp.Configs[1].Name != "release" {
+		t.Fatalf("expected second config name %q, got %q", "release", resp.Configs[1].Name)
+	}
+
+	// Verify build_dir values.
+	if resp.Configs[0].BuildDir != "build/debug" {
+		t.Fatalf("expected build_dir %q, got %q", "build/debug", resp.Configs[0].BuildDir)
+	}
+	if resp.Configs[1].BuildDir != "build/release" {
+		t.Fatalf("expected build_dir %q, got %q", "build/release", resp.Configs[1].BuildDir)
+	}
+
+	// Both should be unconfigured initially.
+	for _, cs := range resp.Configs {
+		if cs.Status != "unconfigured" {
+			t.Fatalf("expected status %q for %q, got %q", "unconfigured", cs.Name, cs.Status)
+		}
+	}
+}
+
+func TestMultiConfigConfigureOneDoesNotAffectOther(t *testing.T) {
+	srv := newMultiTestServer(map[string]*fakeBuilder{
+		"debug": {
+			configureResult: &builder.BuildResult{ExitCode: 0},
+		},
+		"release": {
+			configureResult: &builder.BuildResult{ExitCode: 0},
+		},
+	}, "debug")
+
+	// Configure only the release config.
+	req := makeCallToolRequest(map[string]interface{}{"config": "release"})
+	result, err := srv.handleConfigure(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	// Check list_configs: release should be configured, debug should still be unconfigured.
+	listReq := makeCallToolRequest(nil)
+	listResult, err := srv.handleListConfigs(context.Background(), listReq)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var resp listConfigsResponse
+	text := extractText(t, listResult)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	for _, cs := range resp.Configs {
+		switch cs.Name {
+		case "debug":
+			if cs.Status != "unconfigured" {
+				t.Fatalf("expected debug status %q, got %q", "unconfigured", cs.Status)
+			}
+		case "release":
+			if cs.Status != "configured" {
+				t.Fatalf("expected release status %q, got %q", "configured", cs.Status)
+			}
+		default:
+			t.Fatalf("unexpected config name %q", cs.Name)
+		}
+	}
+}
+
+func TestMultiConfigDefaultRouting(t *testing.T) {
+	debugFB := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+	releaseFB := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+	srv := newMultiTestServer(map[string]*fakeBuilder{
+		"debug":   debugFB,
+		"release": releaseFB,
+	}, "debug")
+
+	// Call configure with no config param — should route to default (debug).
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleConfigure(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	// Verify debug is configured, release is not.
+	listReq := makeCallToolRequest(nil)
+	listResult, err := srv.handleListConfigs(context.Background(), listReq)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var resp listConfigsResponse
+	text := extractText(t, listResult)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	for _, cs := range resp.Configs {
+		switch cs.Name {
+		case "debug":
+			if cs.Status != "configured" {
+				t.Fatalf("expected debug status %q after default route, got %q", "configured", cs.Status)
+			}
+		case "release":
+			if cs.Status != "unconfigured" {
+				t.Fatalf("expected release status %q, got %q", "unconfigured", cs.Status)
+			}
+		default:
+			t.Fatalf("unexpected config name %q", cs.Name)
+		}
+	}
+}
+
 // extractText extracts the text content from a CallToolResult.
 func extractText(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()

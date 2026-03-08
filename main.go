@@ -39,29 +39,29 @@ func (srv *mcpServer) resolveConfig(req mcp.CallToolRequest) (*configInstance, e
 }
 
 func main() {
-	cfg, err := config.Load(".")
+	configs, defaultName, err := config.LoadMulti(".")
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	b, err := builder.NewBuilder(cfg)
-	if err != nil {
-		log.Fatalf("failed to create builder: %v", err)
+	registry := newConfigRegistry(defaultName)
+	for name, cfg := range configs {
+		b, err := builder.NewBuilder(cfg)
+		if err != nil {
+			log.Fatalf("failed to create builder for config %q: %v", name, err)
+		}
+
+		inst := &configInstance{
+			name:    name,
+			cfg:     cfg,
+			builder: b,
+			store:   state.NewStore(),
+		}
+		registry.add(inst)
+
+		// Run toolchain detection eagerly at startup.
+		resolveToolchain(inst)
 	}
-
-	store := state.NewStore()
-
-	registry := newConfigRegistry("default")
-	inst := &configInstance{
-		name:    "default",
-		cfg:     cfg,
-		builder: b,
-		store:   store,
-	}
-	registry.add(inst)
-
-	// Run toolchain detection eagerly at startup.
-	resolveToolchain(inst)
 
 	srv := &mcpServer{
 		registry: registry,
