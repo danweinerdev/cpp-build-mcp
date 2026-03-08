@@ -31,7 +31,7 @@ func NewBuilder(cfg *config.Config) (Builder, error) {
 	case "ninja", "":
 		return NewCMakeBuilder(cfg), nil
 	case "make":
-		return nil, fmt.Errorf("make builder not yet implemented (coming in Phase 4)")
+		return NewMakeBuilder(cfg), nil
 	default:
 		return nil, fmt.Errorf("unsupported generator: %s (supported: ninja, make)", cfg.Generator)
 	}

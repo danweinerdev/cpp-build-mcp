@@ -39,14 +39,14 @@ func TestNewBuilderFactory(t *testing.T) {
 		}
 	})
 
-	t.Run("make returns error", func(t *testing.T) {
+	t.Run("make returns MakeBuilder", func(t *testing.T) {
 		cfg := &config.Config{Generator: "make"}
-		_, err := NewBuilder(cfg)
-		if err == nil {
-			t.Fatal("expected error for make generator")
+		b, err := NewBuilder(cfg)
+		if err != nil {
+			t.Fatalf("NewBuilder() returned error: %v", err)
 		}
-		if !strings.Contains(err.Error(), "not yet implemented") {
-			t.Fatalf("unexpected error message: %v", err)
+		if _, ok := b.(*MakeBuilder); !ok {
+			t.Fatalf("expected *MakeBuilder, got %T", b)
 		}
 	})
 
