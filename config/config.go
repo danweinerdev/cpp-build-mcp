@@ -114,7 +114,9 @@ func Load(dir string) (*Config, error) {
 // "default" is returned with default name "default".
 //
 // Environment variable overrides are applied only in single-config mode
-// (no "configs" map). Multi-config env var handling is deferred to the caller.
+// (no "configs" map). In multi-config mode, env vars are intentionally
+// ignored to preserve build_dir uniqueness, and a warning is logged if
+// any are set.
 func LoadMulti(dir string) (map[string]*Config, string, error) {
 	path := filepath.Join(dir, configFileName)
 	data, err := os.ReadFile(path)
@@ -184,6 +186,22 @@ func LoadMulti(dir string) (map[string]*Config, string, error) {
 		return nil, "", fmt.Errorf("parsing config file %s: default_config %q not found in configs map", path, defaultName)
 	}
 
+	// Validate build_dir uniqueness across all configurations.
+	buildDirOwner := make(map[string]string, len(configs))
+	for _, name := range sortedConfigNames(configs) {
+		bd := configs[name].BuildDir
+		if prev, ok := buildDirOwner[bd]; ok {
+			return nil, "", fmt.Errorf(
+				"configurations %q and %q share build_dir %q — each configuration must have a unique build_dir",
+				prev, name, bd)
+		}
+		buildDirOwner[bd] = name
+	}
+
+	// Warn if any relevant env vars are set — they are intentionally
+	// ignored in multi-config mode to preserve build_dir uniqueness.
+	warnEnvVarsIgnored()
+
 	slog.Debug("loaded multi-config file", "path", path, "configs", len(configs), "default", defaultName)
 	return configs, defaultName, nil
 }
@@ -228,6 +246,37 @@ func applyJSON(cfg *Config, data []byte) error {
 	}
 
 	return nil
+}
+
+// multiConfigEnvVars lists the environment variables that are checked (and
+// ignored) in multi-config mode.
+var multiConfigEnvVars = []string{
+	"CPP_BUILD_MCP_BUILD_DIR",
+	"CPP_BUILD_MCP_SOURCE_DIR",
+	"CPP_BUILD_MCP_TOOLCHAIN",
+	"CPP_BUILD_MCP_GENERATOR",
+	"CPP_BUILD_MCP_BUILD_TIMEOUT",
+}
+
+// warnEnvVarsIgnored emits a single slog.Warn if any of the relevant
+// environment variables are set (non-empty). Called only in multi-config mode.
+func warnEnvVarsIgnored() {
+	for _, key := range multiConfigEnvVars {
+		if os.Getenv(key) != "" {
+			slog.Warn("environment variable overrides ignored in multi-config mode")
+			return
+		}
+	}
+}
+
+// sortedConfigNames returns the keys of configs in sorted order.
+func sortedConfigNames(configs map[string]*Config) []string {
+	names := make([]string, 0, len(configs))
+	for name := range configs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // applyEnv overrides config values with environment variables when they are

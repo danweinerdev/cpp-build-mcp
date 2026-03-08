@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -390,8 +393,8 @@ func TestLoadMulti(t *testing.T) {
 			"inject_diagnostic_flags": true,
 			"cmake_args": ["-DSHARED=1"],
 			"configs": {
-				"a": {},
-				"b": {}
+				"a": {"build_dir": "build-a"},
+				"b": {"build_dir": "build-b"}
 			}
 		}`)
 
@@ -543,6 +546,234 @@ func TestLoadMulti(t *testing.T) {
 		}
 		assertEqual(t, "CMakeArgs[0]", cfg.CMakeArgs[0], "-DA=1")
 		assertEqual(t, "CMakeArgs[1]", cfg.CMakeArgs[1], "-DB=2")
+	})
+}
+
+func TestLoadMulti_DuplicateBuildDir(t *testing.T) {
+	t.Run("two configs with same build_dir produce error naming both", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"configs": {
+				"debug": {"build_dir": "build"},
+				"release": {"build_dir": "build"}
+			}
+		}`)
+
+		_, _, err := LoadMulti(dir)
+		if err == nil {
+			t.Fatal("LoadMulti() should have returned an error for duplicate build_dir")
+		}
+
+		errMsg := err.Error()
+		// Names should be sorted, so "debug" comes before "release".
+		wantMsg := `configurations "debug" and "release" share build_dir "build" — each configuration must have a unique build_dir`
+		if errMsg != wantMsg {
+			t.Errorf("error message mismatch:\ngot:  %s\nwant: %s", errMsg, wantMsg)
+		}
+	})
+
+	t.Run("duplicate build_dir from inherited default", func(t *testing.T) {
+		dir := t.TempDir()
+		// Both configs inherit build_dir "build" from defaults (neither overrides it).
+		writeConfig(t, dir, `{
+			"configs": {
+				"alpha": {},
+				"beta": {}
+			}
+		}`)
+
+		_, _, err := LoadMulti(dir)
+		if err == nil {
+			t.Fatal("LoadMulti() should have returned an error for duplicate inherited build_dir")
+		}
+
+		errMsg := err.Error()
+		if !strings.Contains(errMsg, `"alpha"`) || !strings.Contains(errMsg, `"beta"`) {
+			t.Errorf("error should name both configs, got: %s", errMsg)
+		}
+		if !strings.Contains(errMsg, `"build"`) {
+			t.Errorf("error should name the shared build_dir, got: %s", errMsg)
+		}
+	})
+
+	t.Run("unique build_dirs pass validation", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"configs": {
+				"debug": {"build_dir": "build/debug"},
+				"release": {"build_dir": "build/release"}
+			}
+		}`)
+
+		_, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+	})
+}
+
+func TestLoadMulti_EnvVarWarningInMultiConfig(t *testing.T) {
+	t.Run("env vars ignored and warning emitted in multi-config mode", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"build_dir": "base",
+			"source_dir": "src",
+			"toolchain": "gcc",
+			"generator": "make",
+			"build_timeout": "3m",
+			"configs": {
+				"dev": {
+					"build_dir": "dev-build",
+					"source_dir": "dev-src"
+				}
+			}
+		}`)
+
+		// Set env vars that would normally override config values.
+		t.Setenv("CPP_BUILD_MCP_BUILD_DIR", "env-build")
+		t.Setenv("CPP_BUILD_MCP_SOURCE_DIR", "env-src")
+		t.Setenv("CPP_BUILD_MCP_TOOLCHAIN", "clang")
+		t.Setenv("CPP_BUILD_MCP_GENERATOR", "ninja")
+		t.Setenv("CPP_BUILD_MCP_BUILD_TIMEOUT", "15m")
+
+		// Capture slog output.
+		var buf bytes.Buffer
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+		origLogger := slog.Default()
+		slog.SetDefault(slog.New(handler))
+		defer slog.SetDefault(origLogger)
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		cfg := configs["dev"]
+
+		// Verify env vars were NOT applied — values should come from JSON.
+		assertEqual(t, "BuildDir", cfg.BuildDir, "dev-build")
+		assertEqual(t, "SourceDir", cfg.SourceDir, "dev-src")
+		assertEqual(t, "Toolchain", cfg.Toolchain, "gcc")
+		assertEqual(t, "Generator", cfg.Generator, "make")
+		assertDuration(t, "BuildTimeout", cfg.BuildTimeout, 3*time.Minute)
+
+		// Verify slog.Warn was emitted.
+		logOutput := buf.String()
+		if !strings.Contains(logOutput, "environment variable overrides ignored in multi-config mode") {
+			t.Errorf("expected warning about ignored env vars in log output, got: %q", logOutput)
+		}
+	})
+
+	t.Run("no warning when no env vars are set in multi-config mode", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"configs": {
+				"dev": {"build_dir": "dev-build"}
+			}
+		}`)
+
+		// Ensure none of the relevant env vars are set.
+		t.Setenv("CPP_BUILD_MCP_BUILD_DIR", "")
+		t.Setenv("CPP_BUILD_MCP_SOURCE_DIR", "")
+		t.Setenv("CPP_BUILD_MCP_TOOLCHAIN", "")
+		t.Setenv("CPP_BUILD_MCP_GENERATOR", "")
+		t.Setenv("CPP_BUILD_MCP_BUILD_TIMEOUT", "")
+
+		var buf bytes.Buffer
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+		origLogger := slog.Default()
+		slog.SetDefault(slog.New(handler))
+		defer slog.SetDefault(origLogger)
+
+		_, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		logOutput := buf.String()
+		if strings.Contains(logOutput, "environment variable overrides ignored") {
+			t.Errorf("unexpected warning when no env vars are set: %q", logOutput)
+		}
+	})
+
+	t.Run("warning emitted when only one env var is set", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"configs": {
+				"dev": {"build_dir": "dev-build"}
+			}
+		}`)
+
+		// Set only one env var.
+		t.Setenv("CPP_BUILD_MCP_TOOLCHAIN", "clang")
+
+		var buf bytes.Buffer
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+		origLogger := slog.Default()
+		slog.SetDefault(slog.New(handler))
+		defer slog.SetDefault(origLogger)
+
+		_, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		logOutput := buf.String()
+		if !strings.Contains(logOutput, "environment variable overrides ignored in multi-config mode") {
+			t.Errorf("expected warning about ignored env vars, got: %q", logOutput)
+		}
+	})
+}
+
+func TestLoadMulti_EnvVarsAppliedInSingleConfigMode(t *testing.T) {
+	t.Run("env vars applied in single-config mode via LoadMulti", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"build_dir": "out",
+			"source_dir": "src",
+			"toolchain": "gcc",
+			"generator": "make",
+			"build_timeout": "3m"
+		}`)
+
+		t.Setenv("CPP_BUILD_MCP_BUILD_DIR", "env-build")
+		t.Setenv("CPP_BUILD_MCP_SOURCE_DIR", "env-src")
+		t.Setenv("CPP_BUILD_MCP_TOOLCHAIN", "clang")
+		t.Setenv("CPP_BUILD_MCP_GENERATOR", "ninja")
+		t.Setenv("CPP_BUILD_MCP_BUILD_TIMEOUT", "15m")
+
+		configs, defaultName, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		assertEqual(t, "defaultName", defaultName, "default")
+		cfg := configs["default"]
+
+		// Env vars should override JSON values in single-config mode.
+		assertEqual(t, "BuildDir", cfg.BuildDir, "env-build")
+		assertEqual(t, "SourceDir", cfg.SourceDir, "env-src")
+		assertEqual(t, "Toolchain", cfg.Toolchain, "clang")
+		assertEqual(t, "Generator", cfg.Generator, "ninja")
+		assertDuration(t, "BuildTimeout", cfg.BuildTimeout, 15*time.Minute)
+	})
+
+	t.Run("env vars applied when no config file exists via LoadMulti", func(t *testing.T) {
+		dir := t.TempDir()
+
+		t.Setenv("CPP_BUILD_MCP_BUILD_DIR", "env-build")
+		t.Setenv("CPP_BUILD_MCP_BUILD_TIMEOUT", "30s")
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		cfg := configs["default"]
+		assertEqual(t, "BuildDir", cfg.BuildDir, "env-build")
+		assertDuration(t, "BuildTimeout", cfg.BuildTimeout, 30*time.Second)
+		// Non-overridden fields keep defaults.
+		assertEqual(t, "Toolchain", cfg.Toolchain, "auto")
 	})
 }
 
