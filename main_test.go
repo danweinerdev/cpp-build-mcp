@@ -1873,6 +1873,351 @@ func TestSingleConfigPresetRouting(t *testing.T) {
 	}
 }
 
+// --- Preset-derived E2E tests ---
+
+// TestPresetDerivedListConfigs verifies that starting a server with only a
+// CMakePresets.json (no .cpp-build-mcp.json) produces the correct
+// preset-derived configs via list_configs: correct names, build_dirs, and
+// "unconfigured" status.
+func TestPresetDerivedListConfigs(t *testing.T) {
+	dir := t.TempDir()
+
+	presetsJSON := `{
+		"version": 3,
+		"configurePresets": [
+			{
+				"name": "debug",
+				"binaryDir": "${sourceDir}/build/debug",
+				"generator": "Ninja"
+			},
+			{
+				"name": "release",
+				"binaryDir": "${sourceDir}/build/release",
+				"generator": "Ninja"
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "CMakePresets.json"), []byte(presetsJSON), 0o644); err != nil {
+		t.Fatalf("failed to write CMakePresets.json: %v", err)
+	}
+
+	configs, defaultName, err := config.LoadMulti(dir)
+	if err != nil {
+		t.Fatalf("LoadMulti() returned error: %v", err)
+	}
+
+	// Build an mcpServer from the preset-derived configs.
+	builders := make(map[string]*fakeBuilder, len(configs))
+	registry := newConfigRegistry(defaultName)
+	for name, cfg := range configs {
+		fb := &fakeBuilder{
+			configureResult: &builder.BuildResult{ExitCode: 0},
+		}
+		builders[name] = fb
+		registry.add(&configInstance{
+			name:    name,
+			cfg:     cfg,
+			builder: fb,
+			store:   state.NewStore(),
+		})
+	}
+	srv := &mcpServer{registry: registry}
+
+	// Call list_configs.
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleListConfigs(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp listConfigsResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	// Should have two configs.
+	if len(resp.Configs) != 2 {
+		t.Fatalf("expected 2 configs, got %d", len(resp.Configs))
+	}
+
+	// Default should be the alphabetically first preset name.
+	if resp.DefaultConfig != "debug" {
+		t.Fatalf("expected default_config %q, got %q", "debug", resp.DefaultConfig)
+	}
+
+	// Configs should be sorted alphabetically: debug, release.
+	if resp.Configs[0].Name != "debug" {
+		t.Fatalf("expected first config name %q, got %q", "debug", resp.Configs[0].Name)
+	}
+	if resp.Configs[1].Name != "release" {
+		t.Fatalf("expected second config name %q, got %q", "release", resp.Configs[1].Name)
+	}
+
+	// Verify build_dir values come from the preset binaryDir (expanded).
+	expectedDebugDir := filepath.Join(dir, "build/debug")
+	expectedReleaseDir := filepath.Join(dir, "build/release")
+	if resp.Configs[0].BuildDir != expectedDebugDir {
+		t.Fatalf("expected debug build_dir %q, got %q", expectedDebugDir, resp.Configs[0].BuildDir)
+	}
+	if resp.Configs[1].BuildDir != expectedReleaseDir {
+		t.Fatalf("expected release build_dir %q, got %q", expectedReleaseDir, resp.Configs[1].BuildDir)
+	}
+
+	// Both should be unconfigured.
+	for _, cs := range resp.Configs {
+		if cs.Status != "unconfigured" {
+			t.Fatalf("expected status %q for %q, got %q", "unconfigured", cs.Name, cs.Status)
+		}
+	}
+
+	// Verify that the Config.Preset field is populated for each config.
+	if configs["debug"].Preset != "debug" {
+		t.Errorf("debug.Preset: got %q, want %q", configs["debug"].Preset, "debug")
+	}
+	if configs["release"].Preset != "release" {
+		t.Errorf("release.Preset: got %q, want %q", configs["release"].Preset, "release")
+	}
+}
+
+// TestPresetDerivedConfigureDispatch verifies that calling configure with a
+// preset-derived config name dispatches to the correct fakeBuilder and that
+// Config.Preset is "debug".
+func TestPresetDerivedConfigureDispatch(t *testing.T) {
+	dir := t.TempDir()
+
+	presetsJSON := `{
+		"version": 3,
+		"configurePresets": [
+			{
+				"name": "debug",
+				"binaryDir": "${sourceDir}/build/debug",
+				"generator": "Ninja"
+			},
+			{
+				"name": "release",
+				"binaryDir": "${sourceDir}/build/release",
+				"generator": "Ninja"
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "CMakePresets.json"), []byte(presetsJSON), 0o644); err != nil {
+		t.Fatalf("failed to write CMakePresets.json: %v", err)
+	}
+
+	configs, defaultName, err := config.LoadMulti(dir)
+	if err != nil {
+		t.Fatalf("LoadMulti() returned error: %v", err)
+	}
+
+	debugFB := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+	releaseFB := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+
+	registry := newConfigRegistry(defaultName)
+	for name, cfg := range configs {
+		var fb *fakeBuilder
+		if name == "debug" {
+			fb = debugFB
+		} else {
+			fb = releaseFB
+		}
+		registry.add(&configInstance{
+			name:    name,
+			cfg:     cfg,
+			builder: fb,
+			store:   state.NewStore(),
+		})
+	}
+	srv := &mcpServer{registry: registry}
+
+	// Verify Config.Preset is "debug" before calling configure.
+	if configs["debug"].Preset != "debug" {
+		t.Fatalf("expected Config.Preset %q, got %q", "debug", configs["debug"].Preset)
+	}
+
+	// Call configure(config: "debug").
+	req := makeCallToolRequest(map[string]interface{}{"config": "debug"})
+	result, err := srv.handleConfigure(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp configureResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if !resp.Success {
+		t.Fatal("expected configure success=true")
+	}
+
+	// Verify the debug fakeBuilder was called (Configure dispatched to it).
+	// fakeBuilder.lastConfigureArgs is set on every Configure call, even if
+	// args is nil — it gets set to the args slice (which may be nil/empty).
+	// The key signal is that the store state for debug is now configured.
+
+	// Verify release builder was NOT called.
+	if releaseFB.lastConfigureArgs != nil {
+		t.Fatal("release builder Configure() was called when dispatching to debug")
+	}
+
+	// Verify list_configs shows debug as configured, release as unconfigured.
+	listReq := makeCallToolRequest(nil)
+	listResult, err := srv.handleListConfigs(context.Background(), listReq)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var listResp listConfigsResponse
+	listText := extractText(t, listResult)
+	if err := json.Unmarshal([]byte(listText), &listResp); err != nil {
+		t.Fatalf("failed to unmarshal list_configs response: %v", err)
+	}
+
+	for _, cs := range listResp.Configs {
+		switch cs.Name {
+		case "debug":
+			if cs.Status != "configured" {
+				t.Fatalf("expected debug status %q after configure, got %q", "configured", cs.Status)
+			}
+		case "release":
+			if cs.Status != "unconfigured" {
+				t.Fatalf("expected release status %q, got %q", "unconfigured", cs.Status)
+			}
+		default:
+			t.Fatalf("unexpected config name %q", cs.Name)
+		}
+	}
+}
+
+// TestPresetDerivedHybridBuildTimeout verifies that when both CMakePresets.json
+// and .cpp-build-mcp.json exist, preset-derived configs inherit the top-level
+// build_timeout override from the config file.
+func TestPresetDerivedHybridBuildTimeout(t *testing.T) {
+	dir := t.TempDir()
+
+	presetsJSON := `{
+		"version": 3,
+		"configurePresets": [
+			{
+				"name": "debug",
+				"binaryDir": "${sourceDir}/build/debug",
+				"generator": "Ninja"
+			},
+			{
+				"name": "release",
+				"binaryDir": "${sourceDir}/build/release",
+				"generator": "Ninja"
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "CMakePresets.json"), []byte(presetsJSON), 0o644); err != nil {
+		t.Fatalf("failed to write CMakePresets.json: %v", err)
+	}
+
+	configJSON := `{
+		"build_timeout": "10m"
+	}`
+	if err := os.WriteFile(filepath.Join(dir, ".cpp-build-mcp.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatalf("failed to write .cpp-build-mcp.json: %v", err)
+	}
+
+	configs, defaultName, err := config.LoadMulti(dir)
+	if err != nil {
+		t.Fatalf("LoadMulti() returned error: %v", err)
+	}
+
+	// Verify we got two preset-derived configs.
+	if len(configs) != 2 {
+		t.Fatalf("expected 2 configs, got %d", len(configs))
+	}
+
+	// Verify default config is alphabetically first.
+	if defaultName != "debug" {
+		t.Fatalf("expected default_config %q, got %q", "debug", defaultName)
+	}
+
+	// Verify both configs have build_timeout of 10 minutes (from .cpp-build-mcp.json override).
+	expectedTimeout := 10 * time.Minute
+	for name, cfg := range configs {
+		if cfg.BuildTimeout != expectedTimeout {
+			t.Errorf("config %q: expected BuildTimeout %v, got %v", name, expectedTimeout, cfg.BuildTimeout)
+		}
+	}
+
+	// Verify preset-derived fields were NOT overridden by the config file
+	// (build_dir, generator, preset are preserved from presets).
+	expectedDebugDir := filepath.Join(dir, "build/debug")
+	expectedReleaseDir := filepath.Join(dir, "build/release")
+	if configs["debug"].BuildDir != expectedDebugDir {
+		t.Errorf("debug.BuildDir: got %q, want %q", configs["debug"].BuildDir, expectedDebugDir)
+	}
+	if configs["release"].BuildDir != expectedReleaseDir {
+		t.Errorf("release.BuildDir: got %q, want %q", configs["release"].BuildDir, expectedReleaseDir)
+	}
+	if configs["debug"].Preset != "debug" {
+		t.Errorf("debug.Preset: got %q, want %q", configs["debug"].Preset, "debug")
+	}
+	if configs["release"].Preset != "release" {
+		t.Errorf("release.Preset: got %q, want %q", configs["release"].Preset, "release")
+	}
+	if configs["debug"].Generator != "ninja" {
+		t.Errorf("debug.Generator: got %q, want %q", configs["debug"].Generator, "ninja")
+	}
+	if configs["release"].Generator != "ninja" {
+		t.Errorf("release.Generator: got %q, want %q", configs["release"].Generator, "ninja")
+	}
+
+	// Also verify via the server layer: build an mcpServer and check list_configs.
+	registry := newConfigRegistry(defaultName)
+	for name, cfg := range configs {
+		fb := &fakeBuilder{
+			configureResult: &builder.BuildResult{ExitCode: 0},
+		}
+		registry.add(&configInstance{
+			name:    name,
+			cfg:     cfg,
+			builder: fb,
+			store:   state.NewStore(),
+		})
+	}
+	srv := &mcpServer{registry: registry}
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleListConfigs(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp listConfigsResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if len(resp.Configs) != 2 {
+		t.Fatalf("expected 2 configs, got %d", len(resp.Configs))
+	}
+	if resp.Configs[0].BuildDir != expectedDebugDir {
+		t.Fatalf("list_configs debug build_dir: got %q, want %q", resp.Configs[0].BuildDir, expectedDebugDir)
+	}
+	if resp.Configs[1].BuildDir != expectedReleaseDir {
+		t.Fatalf("list_configs release build_dir: got %q, want %q", resp.Configs[1].BuildDir, expectedReleaseDir)
+	}
+}
+
 // extractText extracts the text content from a CallToolResult.
 func extractText(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()
