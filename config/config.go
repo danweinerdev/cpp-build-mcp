@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -56,6 +57,22 @@ type configJSON struct {
 	DiagnosticSerialBuild *bool    `json:"diagnostic_serial_build"`
 }
 
+// configFileJSON is the top-level on-disk file structure. It extends the
+// per-config fields with optional multi-config support via a "configs" map
+// and a "default_config" selector.
+type configFileJSON struct {
+	// Embed all per-config fields so single-config files parse unchanged.
+	configJSON
+
+	// Configs maps named configurations to partial config overlays.
+	// When present, each entry inherits top-level defaults and overrides them.
+	Configs map[string]json.RawMessage `json:"configs"`
+
+	// DefaultConfig names the default configuration when configs is present.
+	// If omitted, the alphabetically first config name is used.
+	DefaultConfig string `json:"default_config"`
+}
+
 // Load reads the project configuration from dir. It looks for a file named
 // .cpp-build-mcp.json in the given directory, applies defaults for any
 // missing fields, and then applies environment variable overrides.
@@ -83,6 +100,84 @@ func Load(dir string) (*Config, error) {
 	applyEnv(&cfg)
 
 	return &cfg, nil
+}
+
+// LoadMulti reads the project configuration from dir and returns a map of
+// named configurations and the name of the default configuration.
+//
+// If the config file contains a "configs" map, each entry is parsed as a
+// partial overlay on top of the top-level defaults. Per-config fields
+// (build_dir, cmake_args, etc.) replace top-level values rather than
+// appending to them.
+//
+// If the config file does not contain a "configs" map, a single config named
+// "default" is returned with default name "default".
+//
+// Environment variable overrides are applied only in single-config mode
+// (no "configs" map). Multi-config env var handling is deferred to the caller.
+func LoadMulti(dir string) (map[string]*Config, string, error) {
+	path := filepath.Join(dir, configFileName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			slog.Debug("no config file found, using defaults", "path", path)
+			cfg := defaults()
+			applyEnv(&cfg)
+			return map[string]*Config{"default": &cfg}, "default", nil
+		}
+		return nil, "", fmt.Errorf("reading config file %s: %w", path, err)
+	}
+
+	// Probe for multi-config structure.
+	var file configFileJSON
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, "", fmt.Errorf("parsing config file %s: invalid JSON: %w", path, err)
+	}
+
+	// Single-config mode: no "configs" map present.
+	if file.Configs == nil {
+		cfg := defaults()
+		if err := applyJSON(&cfg, data); err != nil {
+			return nil, "", fmt.Errorf("parsing config file %s: %w", path, err)
+		}
+		applyEnv(&cfg)
+		slog.Debug("loaded single config file", "path", path)
+		return map[string]*Config{"default": &cfg}, "default", nil
+	}
+
+	// Multi-config mode: build a base config from top-level fields, then
+	// overlay each named config entry.
+	base := defaults()
+	if err := applyJSON(&base, data); err != nil {
+		return nil, "", fmt.Errorf("parsing config file %s: %w", path, err)
+	}
+
+	configs := make(map[string]*Config, len(file.Configs))
+	for name, raw := range file.Configs {
+		// Value copy of base so each config is independent.
+		entry := base
+		if err := applyJSON(&entry, raw); err != nil {
+			return nil, "", fmt.Errorf("parsing config %q in %s: %w", name, path, err)
+		}
+		configs[name] = &entry
+	}
+
+	// Determine default config name.
+	defaultName := file.DefaultConfig
+	if defaultName == "" {
+		// Pick alphabetically first.
+		names := make([]string, 0, len(configs))
+		for name := range configs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		defaultName = names[0]
+	} else if _, ok := configs[defaultName]; !ok {
+		return nil, "", fmt.Errorf("parsing config file %s: default_config %q not found in configs map", path, defaultName)
+	}
+
+	slog.Debug("loaded multi-config file", "path", path, "configs", len(configs), "default", defaultName)
+	return configs, defaultName, nil
 }
 
 // applyJSON unmarshals raw JSON data onto cfg, overriding only the fields

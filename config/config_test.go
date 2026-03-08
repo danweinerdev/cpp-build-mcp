@@ -210,6 +210,318 @@ func TestLoad(t *testing.T) {
 	})
 }
 
+func TestLoadMulti(t *testing.T) {
+	t.Run("single config backward compat", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"build_dir": "out",
+			"source_dir": "src",
+			"toolchain": "clang",
+			"generator": "make",
+			"cmake_args": ["-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"],
+			"build_timeout": "10m",
+			"inject_diagnostic_flags": false,
+			"diagnostic_serial_build": true
+		}`)
+
+		configs, defaultName, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		assertEqual(t, "defaultName", defaultName, "default")
+		if len(configs) != 1 {
+			t.Fatalf("got %d configs, want 1", len(configs))
+		}
+		cfg, ok := configs["default"]
+		if !ok {
+			t.Fatal("missing 'default' config entry")
+		}
+
+		assertEqual(t, "BuildDir", cfg.BuildDir, "out")
+		assertEqual(t, "SourceDir", cfg.SourceDir, "src")
+		assertEqual(t, "Toolchain", cfg.Toolchain, "clang")
+		assertEqual(t, "Generator", cfg.Generator, "make")
+		if len(cfg.CMakeArgs) != 1 {
+			t.Fatalf("CMakeArgs: got %d elements, want 1", len(cfg.CMakeArgs))
+		}
+		assertEqual(t, "CMakeArgs[0]", cfg.CMakeArgs[0], "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
+		assertDuration(t, "BuildTimeout", cfg.BuildTimeout, 10*time.Minute)
+		assertBool(t, "InjectDiagnosticFlags", cfg.InjectDiagnosticFlags, false)
+		assertBool(t, "DiagnosticSerialBuild", cfg.DiagnosticSerialBuild, true)
+	})
+
+	t.Run("missing file returns defaults", func(t *testing.T) {
+		dir := t.TempDir()
+
+		configs, defaultName, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		assertEqual(t, "defaultName", defaultName, "default")
+		if len(configs) != 1 {
+			t.Fatalf("got %d configs, want 1", len(configs))
+		}
+		cfg := configs["default"]
+		assertEqual(t, "BuildDir", cfg.BuildDir, "build")
+		assertEqual(t, "Generator", cfg.Generator, "ninja")
+		assertBool(t, "InjectDiagnosticFlags", cfg.InjectDiagnosticFlags, true)
+	})
+
+	t.Run("multi config with inheritance", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"source_dir": ".",
+			"generator": "ninja",
+			"toolchain": "clang",
+			"build_timeout": "10m",
+			"inject_diagnostic_flags": true,
+			"configs": {
+				"debug": {
+					"build_dir": "build/debug",
+					"cmake_args": ["-DCMAKE_BUILD_TYPE=Debug"]
+				},
+				"release": {
+					"build_dir": "build/release",
+					"cmake_args": ["-DCMAKE_BUILD_TYPE=Release"]
+				}
+			},
+			"default_config": "debug"
+		}`)
+
+		configs, defaultName, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		assertEqual(t, "defaultName", defaultName, "debug")
+		if len(configs) != 2 {
+			t.Fatalf("got %d configs, want 2", len(configs))
+		}
+
+		debug := configs["debug"]
+		release := configs["release"]
+
+		// Per-config overrides.
+		assertEqual(t, "debug.BuildDir", debug.BuildDir, "build/debug")
+		assertEqual(t, "release.BuildDir", release.BuildDir, "build/release")
+		if len(debug.CMakeArgs) != 1 || debug.CMakeArgs[0] != "-DCMAKE_BUILD_TYPE=Debug" {
+			t.Errorf("debug.CMakeArgs: got %v, want [-DCMAKE_BUILD_TYPE=Debug]", debug.CMakeArgs)
+		}
+		if len(release.CMakeArgs) != 1 || release.CMakeArgs[0] != "-DCMAKE_BUILD_TYPE=Release" {
+			t.Errorf("release.CMakeArgs: got %v, want [-DCMAKE_BUILD_TYPE=Release]", release.CMakeArgs)
+		}
+
+		// Inherited top-level fields.
+		assertEqual(t, "debug.SourceDir", debug.SourceDir, ".")
+		assertEqual(t, "debug.Generator", debug.Generator, "ninja")
+		assertEqual(t, "debug.Toolchain", debug.Toolchain, "clang")
+		assertDuration(t, "debug.BuildTimeout", debug.BuildTimeout, 10*time.Minute)
+		assertBool(t, "debug.InjectDiagnosticFlags", debug.InjectDiagnosticFlags, true)
+
+		assertEqual(t, "release.SourceDir", release.SourceDir, ".")
+		assertEqual(t, "release.Generator", release.Generator, "ninja")
+		assertEqual(t, "release.Toolchain", release.Toolchain, "clang")
+		assertDuration(t, "release.BuildTimeout", release.BuildTimeout, 10*time.Minute)
+		assertBool(t, "release.InjectDiagnosticFlags", release.InjectDiagnosticFlags, true)
+	})
+
+	t.Run("cmake_args replace semantics not append", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"cmake_args": ["-DA=1"],
+			"configs": {
+				"custom": {
+					"cmake_args": ["-DB=2"]
+				}
+			}
+		}`)
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		cfg := configs["custom"]
+		if len(cfg.CMakeArgs) != 1 {
+			t.Fatalf("CMakeArgs: got %d elements, want 1 (replace, not append)", len(cfg.CMakeArgs))
+		}
+		assertEqual(t, "CMakeArgs[0]", cfg.CMakeArgs[0], "-DB=2")
+	})
+
+	t.Run("per-config override precedence", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"build_dir": "default-build",
+			"generator": "make",
+			"toolchain": "gcc",
+			"build_timeout": "3m",
+			"inject_diagnostic_flags": true,
+			"diagnostic_serial_build": false,
+			"configs": {
+				"custom": {
+					"build_dir": "custom-build",
+					"generator": "ninja",
+					"build_timeout": "15m",
+					"inject_diagnostic_flags": false,
+					"diagnostic_serial_build": true
+				}
+			}
+		}`)
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		cfg := configs["custom"]
+		assertEqual(t, "BuildDir", cfg.BuildDir, "custom-build")
+		assertEqual(t, "Generator", cfg.Generator, "ninja")
+		assertEqual(t, "Toolchain", cfg.Toolchain, "gcc") // inherited, not overridden
+		assertDuration(t, "BuildTimeout", cfg.BuildTimeout, 15*time.Minute)
+		assertBool(t, "InjectDiagnosticFlags", cfg.InjectDiagnosticFlags, false)
+		assertBool(t, "DiagnosticSerialBuild", cfg.DiagnosticSerialBuild, true)
+	})
+
+	t.Run("value copy isolation", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"inject_diagnostic_flags": true,
+			"configs": {
+				"a": {},
+				"b": {}
+			}
+		}`)
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		// Mutate one config and verify the other is unaffected.
+		configs["a"].InjectDiagnosticFlags = false
+
+		assertBool(t, "a.InjectDiagnosticFlags", configs["a"].InjectDiagnosticFlags, false)
+		assertBool(t, "b.InjectDiagnosticFlags", configs["b"].InjectDiagnosticFlags, true)
+	})
+
+	t.Run("default_config omitted picks alphabetically first", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"configs": {
+				"zebra": {"build_dir": "z"},
+				"alpha": {"build_dir": "a"},
+				"mango": {"build_dir": "m"}
+			}
+		}`)
+
+		_, defaultName, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		assertEqual(t, "defaultName", defaultName, "alpha")
+	})
+
+	t.Run("default_config not in configs map returns error", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"configs": {
+				"debug": {}
+			},
+			"default_config": "nonexistent"
+		}`)
+
+		_, _, err := LoadMulti(dir)
+		if err == nil {
+			t.Fatal("LoadMulti() should have returned an error for invalid default_config")
+		}
+	})
+
+	t.Run("invalid JSON returns error", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{not valid json}`)
+
+		_, _, err := LoadMulti(dir)
+		if err == nil {
+			t.Fatal("LoadMulti() should have returned an error for invalid JSON")
+		}
+	})
+
+	t.Run("invalid per-config entry returns error", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"configs": {
+				"bad": {"build_timeout": "not-a-duration"}
+			}
+		}`)
+
+		_, _, err := LoadMulti(dir)
+		if err == nil {
+			t.Fatal("LoadMulti() should have returned an error for invalid per-config entry")
+		}
+	})
+
+	t.Run("single config mode applies env vars", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{"build_dir": "out"}`)
+
+		t.Setenv("CPP_BUILD_MCP_BUILD_DIR", "env-build")
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		assertEqual(t, "BuildDir", configs["default"].BuildDir, "env-build")
+	})
+
+	t.Run("multi config mode does not apply env vars", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"build_dir": "base",
+			"configs": {
+				"dev": {"build_dir": "dev-build"}
+			}
+		}`)
+
+		t.Setenv("CPP_BUILD_MCP_BUILD_DIR", "env-build")
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		// Env vars should NOT be applied in multi-config mode.
+		assertEqual(t, "BuildDir", configs["dev"].BuildDir, "dev-build")
+	})
+
+	t.Run("top-level cmake_args inherited when per-config omits them", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"cmake_args": ["-DA=1", "-DB=2"],
+			"configs": {
+				"inheritor": {
+					"build_dir": "build/inheritor"
+				}
+			}
+		}`)
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		cfg := configs["inheritor"]
+		if len(cfg.CMakeArgs) != 2 {
+			t.Fatalf("CMakeArgs: got %d elements, want 2 (inherited from top-level)", len(cfg.CMakeArgs))
+		}
+		assertEqual(t, "CMakeArgs[0]", cfg.CMakeArgs[0], "-DA=1")
+		assertEqual(t, "CMakeArgs[1]", cfg.CMakeArgs[1], "-DB=2")
+	})
+}
+
 // writeConfig writes JSON content to .cpp-build-mcp.json in dir.
 func writeConfig(t *testing.T, dir, content string) {
 	t.Helper()
