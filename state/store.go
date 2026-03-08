@@ -195,6 +195,14 @@ func (s *Store) SetClean() {
 	s.state.WarningCount = 0
 }
 
+// LastSuccessfulBuildTime returns the time of the last successful build.
+// Returns the zero time if no successful build has been recorded.
+func (s *Store) LastSuccessfulBuildTime() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.LastSuccessfulBuildTime
+}
+
 // GetPhase returns the current build phase.
 func (s *Store) GetPhase() Phase {
 	s.mu.RLock()
