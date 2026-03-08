@@ -591,8 +591,10 @@ func TestLoadMulti(t *testing.T) {
 
 		// debug overrides preset from per-config.
 		assertEqual(t, "debug.Preset", configs["debug"].Preset, "debug-preset")
+		assertEqual(t, "debug.BuildDir", configs["debug"].BuildDir, "build/debug")
 		// release inherits preset from top-level.
 		assertEqual(t, "release.Preset", configs["release"].Preset, "base-preset")
+		assertEqual(t, "release.BuildDir", configs["release"].BuildDir, "build/release")
 	})
 
 	t.Run("preset in single-config via LoadMulti", func(t *testing.T) {

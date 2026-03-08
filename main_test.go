@@ -1595,6 +1595,279 @@ func TestMultiConfigDefaultRouting(t *testing.T) {
 	}
 }
 
+func TestMultiConfigPresetFieldIntegration(t *testing.T) {
+	// Load a multi-config JSON file where one config has a preset field,
+	// verify Config.Preset is populated, list_configs returns both configs,
+	// and configure dispatches to the correct builder.
+	dir := t.TempDir()
+	cfgJSON := `{
+		"source_dir": ".",
+		"generator": "ninja",
+		"configs": {
+			"debug": {
+				"build_dir": "build/debug",
+				"preset": "debug"
+			},
+			"release": {
+				"build_dir": "build/release"
+			}
+		},
+		"default_config": "debug"
+	}`
+	cfgPath := filepath.Join(dir, ".cpp-build-mcp.json")
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o644); err != nil {
+		t.Fatalf("writing config file: %v", err)
+	}
+
+	configs, defaultName, err := config.LoadMulti(dir)
+	if err != nil {
+		t.Fatalf("LoadMulti() returned error: %v", err)
+	}
+
+	// Verify Config.Preset is populated on the debug config.
+	if configs["debug"].Preset != "debug" {
+		t.Errorf("debug.Preset: got %q, want %q", configs["debug"].Preset, "debug")
+	}
+	// Release should have no preset (empty string).
+	if configs["release"].Preset != "" {
+		t.Errorf("release.Preset: got %q, want empty", configs["release"].Preset)
+	}
+	if defaultName != "debug" {
+		t.Errorf("defaultName: got %q, want %q", defaultName, "debug")
+	}
+
+	// Create an mcpServer with fakeBuilder instances using configs from LoadMulti.
+	debugFB := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+	releaseFB := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+
+	registry := newConfigRegistry(defaultName)
+	for name, cfg := range configs {
+		var fb *fakeBuilder
+		if name == "debug" {
+			fb = debugFB
+		} else {
+			fb = releaseFB
+		}
+		registry.add(&configInstance{
+			name:    name,
+			cfg:     cfg,
+			builder: fb,
+			store:   state.NewStore(),
+		})
+	}
+	srv := &mcpServer{registry: registry}
+
+	// Call list_configs — both configs should appear.
+	listReq := makeCallToolRequest(nil)
+	listResult, err := srv.handleListConfigs(context.Background(), listReq)
+	if err != nil {
+		t.Fatalf("handleListConfigs unexpected error: %v", err)
+	}
+	if listResult.IsError {
+		t.Fatalf("handleListConfigs tool error: %s", extractText(t, listResult))
+	}
+
+	var resp listConfigsResponse
+	text := extractText(t, listResult)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal list_configs response: %v", err)
+	}
+	if len(resp.Configs) != 2 {
+		t.Fatalf("expected 2 configs, got %d", len(resp.Configs))
+	}
+	if resp.DefaultConfig != "debug" {
+		t.Fatalf("expected default_config %q, got %q", "debug", resp.DefaultConfig)
+	}
+
+	// Verify config names (sorted).
+	if resp.Configs[0].Name != "debug" || resp.Configs[1].Name != "release" {
+		t.Fatalf("expected config names [debug, release], got [%s, %s]",
+			resp.Configs[0].Name, resp.Configs[1].Name)
+	}
+
+	// Call configure with config: "debug" — verify dispatch via store state.
+	configReq := makeCallToolRequest(map[string]interface{}{"config": "debug"})
+	configResult, err := srv.handleConfigure(context.Background(), configReq)
+	if err != nil {
+		t.Fatalf("handleConfigure unexpected error: %v", err)
+	}
+	if configResult.IsError {
+		t.Fatalf("handleConfigure tool error: %s", extractText(t, configResult))
+	}
+
+	// Re-check list_configs: debug should now be configured, release should
+	// remain unconfigured — proving configure dispatched to the debug builder.
+	listReq2 := makeCallToolRequest(nil)
+	listResult2, err := srv.handleListConfigs(context.Background(), listReq2)
+	if err != nil {
+		t.Fatalf("handleListConfigs unexpected error: %v", err)
+	}
+
+	var resp2 listConfigsResponse
+	text2 := extractText(t, listResult2)
+	if err := json.Unmarshal([]byte(text2), &resp2); err != nil {
+		t.Fatalf("failed to unmarshal list_configs response: %v", err)
+	}
+
+	for _, cs := range resp2.Configs {
+		switch cs.Name {
+		case "debug":
+			if cs.Status != "configured" {
+				t.Fatalf("expected debug status %q after configure, got %q", "configured", cs.Status)
+			}
+		case "release":
+			if cs.Status != "unconfigured" {
+				t.Fatalf("expected release status %q (not dispatched to), got %q", "unconfigured", cs.Status)
+			}
+		default:
+			t.Fatalf("unexpected config name %q", cs.Name)
+		}
+	}
+}
+
+func TestMultiConfigPresetWithBuildDirRouting(t *testing.T) {
+	// Verify that a config entry with both preset and build_dir routes correctly.
+	// The preset+build_dir coexistence on Config is tested in config_test.go;
+	// this test verifies that the routing layer works with such a config.
+	debugFB := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+	releaseFB := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+
+	registry := newConfigRegistry("debug")
+	registry.add(&configInstance{
+		name: "debug",
+		cfg: &config.Config{
+			BuildDir: "build/debug",
+			Preset:   "debug",
+		},
+		builder: debugFB,
+		store:   state.NewStore(),
+	})
+	registry.add(&configInstance{
+		name: "release",
+		cfg: &config.Config{
+			BuildDir: "build/release",
+			Preset:   "release",
+		},
+		builder: releaseFB,
+		store:   state.NewStore(),
+	})
+	srv := &mcpServer{registry: registry}
+
+	// Configure release by name — should dispatch to releaseFB only.
+	req := makeCallToolRequest(map[string]interface{}{"config": "release"})
+	result, err := srv.handleConfigure(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	// Verify list_configs shows the build_dir values and that only release
+	// is configured (proving dispatch went to the release builder).
+	listReq := makeCallToolRequest(nil)
+	listResult, err := srv.handleListConfigs(context.Background(), listReq)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var resp listConfigsResponse
+	text := extractText(t, listResult)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	for _, cs := range resp.Configs {
+		switch cs.Name {
+		case "debug":
+			if cs.BuildDir != "build/debug" {
+				t.Errorf("debug.BuildDir: got %q, want %q", cs.BuildDir, "build/debug")
+			}
+			if cs.Status != "unconfigured" {
+				t.Errorf("debug.Status: got %q, want %q", cs.Status, "unconfigured")
+			}
+		case "release":
+			if cs.BuildDir != "build/release" {
+				t.Errorf("release.BuildDir: got %q, want %q", cs.BuildDir, "build/release")
+			}
+			if cs.Status != "configured" {
+				t.Errorf("release.Status: got %q, want %q", cs.Status, "configured")
+			}
+		default:
+			t.Errorf("unexpected config name %q", cs.Name)
+		}
+	}
+}
+
+func TestSingleConfigPresetRouting(t *testing.T) {
+	// Verify single-config mode with preset field routes to the default builder.
+	// Config parsing for single-config preset is tested in config_test.go;
+	// this test verifies the routing layer works correctly with such a config.
+	fb := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+
+	registry := newConfigRegistry("default")
+	registry.add(&configInstance{
+		name: "default",
+		cfg: &config.Config{
+			BuildDir: "out",
+			Preset:   "mypreset",
+		},
+		builder: fb,
+		store:   state.NewStore(),
+	})
+	srv := &mcpServer{registry: registry}
+
+	// Call configure with no config param — should route to the default.
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleConfigure(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	// Verify list_configs shows one config with the correct build_dir and
+	// status "configured" (proving configure was dispatched to the builder).
+	listReq := makeCallToolRequest(nil)
+	listResult, err := srv.handleListConfigs(context.Background(), listReq)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var resp listConfigsResponse
+	text := extractText(t, listResult)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if len(resp.Configs) != 1 {
+		t.Fatalf("expected 1 config, got %d", len(resp.Configs))
+	}
+	if resp.Configs[0].Name != "default" {
+		t.Errorf("config name: got %q, want %q", resp.Configs[0].Name, "default")
+	}
+	if resp.Configs[0].BuildDir != "out" {
+		t.Errorf("config build_dir: got %q, want %q", resp.Configs[0].BuildDir, "out")
+	}
+	if resp.DefaultConfig != "default" {
+		t.Errorf("default_config: got %q, want %q", resp.DefaultConfig, "default")
+	}
+	if resp.Configs[0].Status != "configured" {
+		t.Errorf("config status: got %q, want %q (proving configure was dispatched)", resp.Configs[0].Status, "configured")
+	}
+}
+
 // extractText extracts the text content from a CallToolResult.
 func extractText(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()
