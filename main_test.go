@@ -1562,6 +1562,10 @@ func TestMultiConfigDefaultRouting(t *testing.T) {
 		t.Fatalf("unexpected tool error: %s", extractText(t, result))
 	}
 
+	if releaseFB.lastConfigureArgs != nil {
+		t.Fatal("release builder Configure() was called when routing to default (debug)")
+	}
+
 	// Verify debug is configured, release is not.
 	listReq := makeCallToolRequest(nil)
 	listResult, err := srv.handleListConfigs(context.Background(), listReq)

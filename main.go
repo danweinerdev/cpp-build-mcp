@@ -59,8 +59,9 @@ func main() {
 		}
 		registry.add(inst)
 
-		// Run toolchain detection eagerly at startup.
-		resolveToolchain(inst)
+		// Run toolchain detection eagerly at startup so the lazy call in
+		// handleBuild finds a concrete toolchain and skips filesystem detection.
+		inst.cfg.Toolchain = resolveToolchain(inst)
 	}
 
 	srv := &mcpServer{
@@ -386,6 +387,8 @@ func (srv *mcpServer) handleGetErrors(_ context.Context, req mcp.CallToolRequest
 }
 
 func (srv *mcpServer) handleBuildHealth(_ context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	// TODO(Phase 3, Task 3.1): Return aggregate format across all configs
+	// when registry.len() > 1. Currently returns only the default config's health.
 	inst := srv.registry.defaultInstance()
 	return []mcp.ResourceContents{
 		mcp.TextResourceContents{
