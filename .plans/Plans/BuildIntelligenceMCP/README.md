@@ -4,6 +4,7 @@ type: plan
 status: active
 created: 2026-03-07
 updated: 2026-03-07
+
 tags: [go, mcp, cpp, build-system, diagnostics]
 related: [Designs/BuildIntelligenceMCP]
 phases:
@@ -13,17 +14,17 @@ phases:
     doc: "01-Foundation.md"
   - id: 2
     title: "Diagnostics and Core Loop"
-    status: planned
+    status: complete
     doc: "02-Diagnostics-Core-Loop.md"
     depends_on: [1]
   - id: 3
     title: "Full Toolset"
-    status: planned
+    status: complete
     doc: "03-Full-Toolset.md"
     depends_on: [2]
   - id: 4
     title: "Broad Compiler Compatibility"
-    status: planned
+    status: complete
     doc: "04-Broad-Compatibility.md"
     depends_on: [2]
   - id: 5
