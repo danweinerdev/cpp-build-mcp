@@ -152,6 +152,104 @@ func TestBuildConfigureArgs(t *testing.T) {
 		assertNotContains(t, args, "-DCMAKE_CXX_FLAGS=-fdiagnostics-format=json")
 	})
 
+	t.Run("preset mode args", func(t *testing.T) {
+		cfg := &config.Config{
+			Preset:                "debug",
+			SourceDir:             "src",
+			BuildDir:              "out/debug",
+			Generator:             "ninja",
+			Toolchain:             "auto",
+			InjectDiagnosticFlags: false,
+		}
+		b := NewCMakeBuilder(cfg)
+		args := b.buildConfigureArgs(nil)
+
+		assertContainsSequence(t, args, "--preset", "debug")
+		assertContains(t, args, "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
+
+		// Preset mode must NOT contain -S, -B, or -G
+		assertNotContains(t, args, "-S")
+		assertNotContains(t, args, "-B")
+		assertNotContains(t, args, "-G")
+	})
+
+	t.Run("non-preset mode regression", func(t *testing.T) {
+		cfg := &config.Config{
+			Preset:                "",
+			SourceDir:             "src",
+			BuildDir:              "build",
+			Generator:             "ninja",
+			Toolchain:             "auto",
+			InjectDiagnosticFlags: false,
+		}
+		b := NewCMakeBuilder(cfg)
+		args := b.buildConfigureArgs(nil)
+
+		assertContainsSequence(t, args, "-S", "src")
+		assertContainsSequence(t, args, "-B", "build")
+		assertContainsSequence(t, args, "-G", "Ninja")
+		assertContains(t, args, "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
+
+		// Non-preset mode must NOT contain --preset
+		assertNotContains(t, args, "--preset")
+	})
+
+	t.Run("preset mode with diagnostic flags", func(t *testing.T) {
+		cfg := &config.Config{
+			Preset:                "debug",
+			BuildDir:              "out/debug",
+			Toolchain:             "clang",
+			InjectDiagnosticFlags: true,
+		}
+		b := NewCMakeBuilder(cfg)
+		args := b.buildConfigureArgs(nil)
+
+		assertContainsSequence(t, args, "--preset", "debug")
+		assertContains(t, args, "-DCMAKE_C_FLAGS=-fdiagnostics-format=json")
+		assertContains(t, args, "-DCMAKE_CXX_FLAGS=-fdiagnostics-format=json")
+
+		// Must NOT contain -S, -B, or -G
+		assertNotContains(t, args, "-S")
+		assertNotContains(t, args, "-B")
+		assertNotContains(t, args, "-G")
+	})
+
+	t.Run("preset mode with CMakeArgs", func(t *testing.T) {
+		cfg := &config.Config{
+			Preset:                "debug",
+			BuildDir:              "out/debug",
+			Toolchain:             "auto",
+			InjectDiagnosticFlags: false,
+			CMakeArgs:             []string{"-DFOO=bar"},
+		}
+		b := NewCMakeBuilder(cfg)
+		args := b.buildConfigureArgs(nil)
+
+		assertContainsSequence(t, args, "--preset", "debug")
+		assertContains(t, args, "-DFOO=bar")
+
+		// --preset should come before -DFOO=bar
+		presetIdx := indexOf(args, "--preset")
+		fooIdx := indexOf(args, "-DFOO=bar")
+		if presetIdx >= fooIdx {
+			t.Fatalf("--preset (index %d) should appear before -DFOO=bar (index %d)", presetIdx, fooIdx)
+		}
+	})
+
+	t.Run("preset mode with extraArgs", func(t *testing.T) {
+		cfg := &config.Config{
+			Preset:                "debug",
+			BuildDir:              "out/debug",
+			Toolchain:             "auto",
+			InjectDiagnosticFlags: false,
+		}
+		b := NewCMakeBuilder(cfg)
+		args := b.buildConfigureArgs([]string{"--extra"})
+
+		assertContainsSequence(t, args, "--preset", "debug")
+		assertContains(t, args, "--extra")
+	})
+
 	t.Run("cmake args and extra args are appended", func(t *testing.T) {
 		cfg := &config.Config{
 			SourceDir:             ".",

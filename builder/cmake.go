@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"syscall"
 	"time"
@@ -65,6 +66,9 @@ func generatorCMakeName(gen string) string {
 	case "ninja", "":
 		return "Ninja"
 	case "make":
+		// Note: NewBuilder routes Generator=="make" to MakeBuilder, so this
+		// branch is not reachable via CMakeBuilder in production. It exists
+		// for completeness and forward-compatibility.
 		return "Unix Makefiles"
 	default:
 		return gen
@@ -74,12 +78,29 @@ func generatorCMakeName(gen string) string {
 // buildConfigureArgs constructs the argument list for a cmake configure
 // invocation. This method is exported-via-test (lowercase) so unit tests can
 // verify argument construction without invoking cmake.
+//
+// When cfg.Preset is non-empty, the preset path is used: --preset <name> is
+// emitted and -S, -B, -G flags are omitted because cmake resolves source dir,
+// build dir, and generator from the preset.
 func (b *CMakeBuilder) buildConfigureArgs(extraArgs []string) []string {
-	args := []string{
-		"-S", b.cfg.SourceDir,
-		"-B", b.cfg.BuildDir,
-		"-G", generatorCMakeName(b.cfg.Generator),
-		"-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+	var args []string
+
+	if b.cfg.Preset != "" {
+		// Preset mode: cmake resolves source dir, build dir, and generator
+		// from the preset — do NOT emit -S, -B, or -G.
+		if b.cfg.BuildDir == "build" {
+			slog.Warn("preset is set but build_dir is the default; build_dir should match the preset's binaryDir",
+				"preset", b.cfg.Preset)
+		}
+		args = []string{"--preset", b.cfg.Preset, "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"}
+	} else {
+		// Non-preset mode: explicit source dir, build dir, and generator.
+		args = []string{
+			"-S", b.cfg.SourceDir,
+			"-B", b.cfg.BuildDir,
+			"-G", generatorCMakeName(b.cfg.Generator),
+			"-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+		}
 	}
 
 	if b.cfg.InjectDiagnosticFlags && b.cfg.Toolchain == "clang" {
