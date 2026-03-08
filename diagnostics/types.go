@@ -21,3 +21,10 @@ type Diagnostic struct {
 	Source    string   `json:"source,omitempty"`
 	RelatedTo string   `json:"related_to,omitempty"`
 }
+
+// DiagnosticParser parses compiler output into structured diagnostics.
+type DiagnosticParser interface {
+	// Parse accepts both stdout and stderr from the build subprocess.
+	// Clang JSON mode reads from stdout; GCC JSON and regex parsers read from stderr.
+	Parse(stdout, stderr string) ([]Diagnostic, error)
+}
