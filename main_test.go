@@ -296,6 +296,31 @@ func TestBuildToolDirtyFlagClearedOnSuccess(t *testing.T) {
 	}
 }
 
+func TestBuildToolKilledSetsDirty(t *testing.T) {
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{
+			ExitCode: -1,
+			Duration: time.Second,
+			Killed:   true,
+		},
+	}
+	srv := newTestServer(fb)
+	srv.store.SetConfigured()
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	if !srv.store.IsDirty() {
+		t.Fatal("expected dirty flag to be set after killed build")
+	}
+}
+
 func TestBuildToolDirtyFlagNotClearedOnFailure(t *testing.T) {
 	fb := &fakeBuilder{
 		buildResult: &builder.BuildResult{

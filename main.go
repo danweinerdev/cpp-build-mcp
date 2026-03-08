@@ -556,12 +556,18 @@ func (srv *mcpServer) handleSuggestFix(_ context.Context, req mcp.CallToolReques
 	lines := strings.Split(string(content), "\n")
 	totalLines := len(lines)
 
+	// Handle file-level diagnostics where the compiler reports no specific line.
+	diagLine := diag.Line
+	if diagLine <= 0 {
+		diagLine = 1
+	}
+
 	// Diagnostic lines are 1-based. Compute the context window [startLine, endLine] (1-based, inclusive).
-	startLine := diag.Line - 10
+	startLine := diagLine - 10
 	if startLine < 1 {
 		startLine = 1
 	}
-	endLine := diag.Line + 10
+	endLine := diagLine + 10
 	if endLine > totalLines {
 		endLine = totalLines
 	}

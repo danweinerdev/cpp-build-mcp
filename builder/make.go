@@ -72,9 +72,7 @@ func (b *MakeBuilder) Clean(ctx context.Context, _ []string) (*BuildResult, erro
 func (b *MakeBuilder) buildBuildArgs(targets []string, jobs int) []string {
 	args := []string{"-C", b.cfg.BuildDir}
 
-	for _, t := range targets {
-		args = append(args, t)
-	}
+	args = append(args, targets...)
 
 	if b.cfg.DiagnosticSerialBuild {
 		jobs = 1
