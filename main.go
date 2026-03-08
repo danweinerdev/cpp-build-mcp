@@ -410,6 +410,8 @@ func (srv *mcpServer) handleBuildHealth(_ context.Context, _ mcp.ReadResourceReq
 	} else {
 		// Multiple configs: return pipe-separated aggregate format sorted by
 		// name (e.g., "debug: OK | release: FAIL(3 errors) | asan: UNCONFIGURED").
+		// Note: len() and all() are separate lock acquisitions, which is safe
+		// because the registry is append-only after startup.
 		instances := srv.registry.all()
 		parts := make([]string, len(instances))
 		for i, inst := range instances {

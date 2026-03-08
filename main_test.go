@@ -667,11 +667,14 @@ func TestBuildHealthSingleConfigReturnsVerboseFormat(t *testing.T) {
 	}
 	tc := result[0].(mcp.TextResourceContents)
 	// Single config should return the verbose Health() format with details.
-	if !strings.Contains(tc.Text, "OK:") {
+	if !strings.HasPrefix(tc.Text, "OK:") {
 		t.Fatalf("expected verbose format with 'OK:' prefix, got %q", tc.Text)
 	}
 	if !strings.Contains(tc.Text, "errors") {
 		t.Fatalf("expected verbose format with 'errors' detail, got %q", tc.Text)
+	}
+	if !strings.Contains(tc.Text, "warnings") {
+		t.Fatalf("expected verbose format with 'warnings' detail, got %q", tc.Text)
 	}
 }
 
@@ -2577,9 +2580,9 @@ func TestSuggestFixResponseContainsConfigField(t *testing.T) {
 	}
 }
 
-// TestMultiConfigResponseRoutesConfigField verifies that when multiple configs
-// exist, each tool response includes the correct config name.
-func TestMultiConfigResponseRoutesConfigField(t *testing.T) {
+// TestMultiConfigConfigureResponseRoutesConfigField verifies that when multiple
+// configs exist, the configure response includes the correct config name.
+func TestMultiConfigConfigureResponseRoutesConfigField(t *testing.T) {
 	debugFB := &fakeBuilder{
 		configureResult: &builder.BuildResult{ExitCode: 0},
 	}

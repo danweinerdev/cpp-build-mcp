@@ -654,6 +654,10 @@ type multiE2EEnv struct {
 func startMultiE2E(t *testing.T, debugFB, releaseFB *fakeBuilder) *multiE2EEnv {
 	t.Helper()
 
+	// Toolchain must be "clang" to match the Clang JSON diagnostic format
+	// used in fakeBuilder stderr/stdout fixtures. Changing this would cause
+	// diagnostics.Parse to use a different parser, silently producing zero
+	// diagnostics and making error-count assertions pass vacuously.
 	debugCfg := &config.Config{
 		BuildDir:     "build/debug",
 		SourceDir:    ".",
