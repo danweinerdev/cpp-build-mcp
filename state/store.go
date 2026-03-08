@@ -216,3 +216,11 @@ func (s *Store) IsBuilding() bool {
 	defer s.mu.RUnlock()
 	return s.state.BuildInProgress
 }
+
+// LastExitCode returns the exit code of the last completed build.
+// Returns 0 if no build has completed yet.
+func (s *Store) LastExitCode() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.LastExitCode
+}

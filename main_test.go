@@ -648,6 +648,110 @@ func TestBuildHealthAfterFailedBuild(t *testing.T) {
 	}
 }
 
+// --- aggregate health tests ---
+
+// TestBuildHealthSingleConfigReturnsVerboseFormat verifies that when only one
+// config exists, build://health returns the existing verbose format unchanged
+// for backward compatibility.
+func TestBuildHealthSingleConfigReturnsVerboseFormat(t *testing.T) {
+	srv, store := newTestServer(&fakeBuilder{})
+	store.SetConfigured()
+	if err := store.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	store.FinishBuild(0, time.Second, nil, nil)
+
+	result, err := srv.handleBuildHealth(context.Background(), mcp.ReadResourceRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tc := result[0].(mcp.TextResourceContents)
+	// Single config should return the verbose Health() format with details.
+	if !strings.Contains(tc.Text, "OK:") {
+		t.Fatalf("expected verbose format with 'OK:' prefix, got %q", tc.Text)
+	}
+	if !strings.Contains(tc.Text, "errors") {
+		t.Fatalf("expected verbose format with 'errors' detail, got %q", tc.Text)
+	}
+}
+
+// TestBuildHealthMultiConfigAggregateFormat verifies that when multiple configs
+// exist, build://health returns the pipe-separated aggregate format with
+// correct per-config tokens sorted by name.
+func TestBuildHealthMultiConfigAggregateFormat(t *testing.T) {
+	registry := newConfigRegistry("debug")
+
+	// debug: configured + successful build -> OK
+	debug := makeTestInstance("debug", "build-debug")
+	debug.store.SetConfigured()
+	if err := debug.store.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	debug.store.FinishBuild(0, time.Second, nil, nil)
+	registry.add(debug)
+
+	// release: configured + failed build with 3 errors -> FAIL(3 errors)
+	release := makeTestInstance("release", "build-release")
+	release.store.SetConfigured()
+	if err := release.store.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	errs := []diagnostics.Diagnostic{
+		{Severity: diagnostics.SeverityError, Message: "e1"},
+		{Severity: diagnostics.SeverityError, Message: "e2"},
+		{Severity: diagnostics.SeverityError, Message: "e3"},
+	}
+	release.store.FinishBuild(1, time.Second, errs, nil)
+	registry.add(release)
+
+	// asan: unconfigured -> UNCONFIGURED
+	asan := makeTestInstance("asan", "build-asan")
+	registry.add(asan)
+
+	srv := &mcpServer{registry: registry}
+	result, err := srv.handleBuildHealth(context.Background(), mcp.ReadResourceRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tc := result[0].(mcp.TextResourceContents)
+
+	// Expected format: "asan: UNCONFIGURED | debug: OK | release: FAIL(3 errors)"
+	// (alphabetical order: asan, debug, release)
+	expected := "asan: UNCONFIGURED | debug: OK | release: FAIL(3 errors)"
+	if tc.Text != expected {
+		t.Fatalf("expected %q, got %q", expected, tc.Text)
+	}
+}
+
+// TestBuildHealthMultiConfigDirtyState verifies that a dirty config renders
+// as "DIRTY" in the aggregate format.
+func TestBuildHealthMultiConfigDirtyState(t *testing.T) {
+	registry := newConfigRegistry("debug")
+
+	// debug: dirty -> DIRTY
+	debug := makeTestInstance("debug", "build-debug")
+	debug.store.SetConfigured()
+	debug.store.SetDirty()
+	registry.add(debug)
+
+	// release: configured -> READY
+	release := makeTestInstance("release", "build-release")
+	release.store.SetConfigured()
+	registry.add(release)
+
+	srv := &mcpServer{registry: registry}
+	result, err := srv.handleBuildHealth(context.Background(), mcp.ReadResourceRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tc := result[0].(mcp.TextResourceContents)
+
+	expected := "debug: DIRTY | release: READY"
+	if tc.Text != expected {
+		t.Fatalf("expected %q, got %q", expected, tc.Text)
+	}
+}
+
 // --- get_warnings tests ---
 
 func TestGetWarningsNoFilter(t *testing.T) {

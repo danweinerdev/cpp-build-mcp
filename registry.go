@@ -108,6 +108,25 @@ func (r *configRegistry) len() int {
 	return len(r.instances)
 }
 
+// all returns all instances sorted by name. The caller must not modify the
+// returned instances.
+func (r *configRegistry) all() []*configInstance {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	names := make([]string, 0, len(r.instances))
+	for n := range r.instances {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	out := make([]*configInstance, len(names))
+	for i, n := range names {
+		out[i] = r.instances[n]
+	}
+	return out
+}
+
 // storeStatusToken maps a Store's state to a compact status token.
 // It checks building before dirty because a build can be in progress while
 // dirty. It checks dirty before phase because a dirty build that was cleaned
@@ -128,5 +147,30 @@ func storeStatusToken(s *state.Store) string {
 		return "built"
 	default:
 		return "unknown"
+	}
+}
+
+// aggregateHealthToken maps a Store's state to an uppercase token for the
+// aggregate build://health format. The tokens match the design spec:
+// OK, FAIL(N errors), UNCONFIGURED, READY, DIRTY, BUILDING.
+func aggregateHealthToken(s *state.Store) string {
+	if s.IsBuilding() {
+		return "BUILDING"
+	}
+	if s.IsDirty() {
+		return "DIRTY"
+	}
+	switch s.GetPhase() {
+	case state.PhaseUnconfigured:
+		return "UNCONFIGURED"
+	case state.PhaseConfigured:
+		return "READY"
+	case state.PhaseBuilt:
+		if s.LastExitCode() == 0 {
+			return "OK"
+		}
+		return fmt.Sprintf("FAIL(%d errors)", len(s.Errors()))
+	default:
+		return "UNKNOWN"
 	}
 }

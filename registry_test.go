@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/danweinerdev/cpp-build-mcp/config"
+	"github.com/danweinerdev/cpp-build-mcp/diagnostics"
 	"github.com/danweinerdev/cpp-build-mcp/state"
 )
 
@@ -203,5 +204,94 @@ func TestStoreStatusTokenDirtyTakesPrecedenceOverPhase(t *testing.T) {
 	token := storeStatusToken(s)
 	if token != "dirty" {
 		t.Fatalf("expected 'dirty' (takes precedence over configured phase), got %q", token)
+	}
+}
+
+// --- aggregateHealthToken tests ---
+
+func TestAggregateHealthTokenUnconfigured(t *testing.T) {
+	s := state.NewStore()
+	if got := aggregateHealthToken(s); got != "UNCONFIGURED" {
+		t.Fatalf("expected UNCONFIGURED, got %q", got)
+	}
+}
+
+func TestAggregateHealthTokenReady(t *testing.T) {
+	s := state.NewStore()
+	s.SetConfigured()
+	if got := aggregateHealthToken(s); got != "READY" {
+		t.Fatalf("expected READY, got %q", got)
+	}
+}
+
+func TestAggregateHealthTokenOK(t *testing.T) {
+	s := state.NewStore()
+	s.SetConfigured()
+	if err := s.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s.FinishBuild(0, time.Second, nil, nil)
+	if got := aggregateHealthToken(s); got != "OK" {
+		t.Fatalf("expected OK, got %q", got)
+	}
+}
+
+func TestAggregateHealthTokenFail(t *testing.T) {
+	s := state.NewStore()
+	s.SetConfigured()
+	if err := s.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	errs := []diagnostics.Diagnostic{
+		{Severity: diagnostics.SeverityError, Message: "e1"},
+		{Severity: diagnostics.SeverityError, Message: "e2"},
+		{Severity: diagnostics.SeverityError, Message: "e3"},
+	}
+	s.FinishBuild(1, time.Second, errs, nil)
+	if got := aggregateHealthToken(s); got != "FAIL(3 errors)" {
+		t.Fatalf("expected FAIL(3 errors), got %q", got)
+	}
+}
+
+func TestAggregateHealthTokenDirty(t *testing.T) {
+	s := state.NewStore()
+	s.SetDirty()
+	if got := aggregateHealthToken(s); got != "DIRTY" {
+		t.Fatalf("expected DIRTY, got %q", got)
+	}
+}
+
+func TestAggregateHealthTokenBuilding(t *testing.T) {
+	s := state.NewStore()
+	s.SetConfigured()
+	if err := s.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := aggregateHealthToken(s); got != "BUILDING" {
+		t.Fatalf("expected BUILDING, got %q", got)
+	}
+}
+
+// --- registry.all() tests ---
+
+func TestRegistryAll(t *testing.T) {
+	reg := newConfigRegistry("debug")
+	reg.add(makeTestInstance("release", "build-release"))
+	reg.add(makeTestInstance("debug", "build-debug"))
+	reg.add(makeTestInstance("asan", "build-asan"))
+
+	all := reg.all()
+	if len(all) != 3 {
+		t.Fatalf("expected 3 instances, got %d", len(all))
+	}
+	// Should be sorted alphabetically: asan, debug, release.
+	if all[0].name != "asan" {
+		t.Fatalf("expected first instance 'asan', got %q", all[0].name)
+	}
+	if all[1].name != "debug" {
+		t.Fatalf("expected second instance 'debug', got %q", all[1].name)
+	}
+	if all[2].name != "release" {
+		t.Fatalf("expected third instance 'release', got %q", all[2].name)
 	}
 }

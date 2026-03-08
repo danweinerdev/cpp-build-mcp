@@ -387,14 +387,29 @@ func (srv *mcpServer) handleGetErrors(_ context.Context, req mcp.CallToolRequest
 }
 
 func (srv *mcpServer) handleBuildHealth(_ context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-	// TODO(Phase 3, Task 3.1): Return aggregate format across all configs
-	// when registry.len() > 1. Currently returns only the default config's health.
-	inst := srv.registry.defaultInstance()
+	var text string
+
+	if srv.registry.len() == 1 {
+		// Single config: return the existing verbose format for backward
+		// compatibility (e.g., "OK: 0 errors, 2 warnings, last build 30s ago").
+		inst := srv.registry.defaultInstance()
+		text = inst.store.Health()
+	} else {
+		// Multiple configs: return pipe-separated aggregate format sorted by
+		// name (e.g., "debug: OK | release: FAIL(3 errors) | asan: UNCONFIGURED").
+		instances := srv.registry.all()
+		parts := make([]string, len(instances))
+		for i, inst := range instances {
+			parts[i] = inst.name + ": " + aggregateHealthToken(inst.store)
+		}
+		text = strings.Join(parts, " | ")
+	}
+
 	return []mcp.ResourceContents{
 		mcp.TextResourceContents{
 			URI:      "build://health",
 			MIMEType: "text/plain",
-			Text:     inst.store.Health(),
+			Text:     text,
 		},
 	}, nil
 }
