@@ -62,10 +62,15 @@ func startE2E(t *testing.T, fb *fakeBuilder) *e2eEnv {
 	}
 
 	store := state.NewStore()
-	srv := &mcpServer{
+	registry := newConfigRegistry("default")
+	registry.add(&configInstance{
+		name:    "default",
+		cfg:     cfg,
 		builder: fb,
 		store:   store,
-		cfg:     cfg,
+	})
+	srv := &mcpServer{
+		registry: registry,
 	}
 
 	s := server.NewMCPServer("cpp-build-mcp", "0.1.0",
@@ -436,10 +441,15 @@ func TestE2EBuildInProgressGuard(t *testing.T) {
 		proceed: proceed,
 	}
 
-	srv := &mcpServer{
+	registry := newConfigRegistry("default")
+	registry.add(&configInstance{
+		name:    "default",
+		cfg:     cfg,
 		builder: blockingBuilder,
 		store:   store,
-		cfg:     cfg,
+	})
+	srv := &mcpServer{
+		registry: registry,
 	}
 
 	s := server.NewMCPServer("cpp-build-mcp", "0.1.0",

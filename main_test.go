@@ -38,6 +38,9 @@ type fakeBuilder struct {
 
 	// Captured arguments from the last Clean call.
 	lastCleanTargets []string
+
+	// Captured dirty flag from the last SetDirty call.
+	lastDirtySet bool
 }
 
 func (f *fakeBuilder) Configure(_ context.Context, args []string) (*builder.BuildResult, error) {
@@ -71,21 +74,28 @@ func (f *fakeBuilder) Clean(_ context.Context, targets []string) (*builder.Build
 	return &builder.BuildResult{}, nil
 }
 
-func (f *fakeBuilder) SetDirty(dirty bool) {}
+func (f *fakeBuilder) SetDirty(dirty bool) { f.lastDirtySet = dirty }
 
 // newTestServer creates an mcpServer with a fakeBuilder and fresh state store.
-func newTestServer(fb *fakeBuilder) *mcpServer {
+// It returns both the server and the store for direct state manipulation in tests.
+func newTestServer(fb *fakeBuilder) (*mcpServer, *state.Store) {
 	cfg := &config.Config{
 		BuildDir:  "build",
 		SourceDir: ".",
 		Toolchain: "auto",
 		Generator: "ninja",
 	}
-	return &mcpServer{
-		builder: fb,
-		store:   state.NewStore(),
+	store := state.NewStore()
+	registry := newConfigRegistry("default")
+	registry.add(&configInstance{
+		name:    "default",
 		cfg:     cfg,
-	}
+		builder: fb,
+		store:   store,
+	})
+	return &mcpServer{
+		registry: registry,
+	}, store
 }
 
 // makeCallToolRequest builds a CallToolRequest with the given arguments map.
@@ -106,7 +116,7 @@ func TestBuildToolUnconfiguredReturnsError(t *testing.T) {
 	fb := &fakeBuilder{
 		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},
 	}
-	srv := newTestServer(fb)
+	srv, _ := newTestServer(fb)
 	// Do NOT call SetConfigured — store is in PhaseUnconfigured.
 
 	req := makeCallToolRequest(nil)
@@ -127,11 +137,11 @@ func TestBuildToolInProgressReturnsError(t *testing.T) {
 	fb := &fakeBuilder{
 		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},
 	}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	// Start a build to mark as in-progress.
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -154,8 +164,8 @@ func TestBuildToolSuccessfulBuild(t *testing.T) {
 			Duration: 2500 * time.Millisecond,
 		},
 	}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleBuild(context.Background(), req)
@@ -196,8 +206,8 @@ func TestBuildToolPassesTargetsAndJobs(t *testing.T) {
 			Duration: time.Second,
 		},
 	}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	req := makeCallToolRequest(map[string]interface{}{
 		"targets": []interface{}{"app", "lib"},
@@ -224,8 +234,8 @@ func TestBuildToolProcessSpawnError(t *testing.T) {
 	fb := &fakeBuilder{
 		buildErr: context.DeadlineExceeded,
 	}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleBuild(context.Background(), req)
@@ -237,7 +247,7 @@ func TestBuildToolProcessSpawnError(t *testing.T) {
 	}
 
 	// State should not be left with build-in-progress.
-	if srv.store.IsBuilding() {
+	if store.IsBuilding() {
 		t.Fatal("expected BuildInProgress to be false after process spawn error")
 	}
 }
@@ -251,8 +261,8 @@ func TestBuildToolUpdatesState(t *testing.T) {
 			Duration: 3 * time.Second,
 		},
 	}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleBuild(context.Background(), req)
@@ -264,11 +274,11 @@ func TestBuildToolUpdatesState(t *testing.T) {
 	}
 
 	// Phase should be PhaseBuilt after build completes.
-	if srv.store.GetPhase() != state.PhaseBuilt {
-		t.Fatalf("expected PhaseBuilt, got %d", srv.store.GetPhase())
+	if store.GetPhase() != state.PhaseBuilt {
+		t.Fatalf("expected PhaseBuilt, got %d", store.GetPhase())
 	}
 	// Build should no longer be in progress.
-	if srv.store.IsBuilding() {
+	if store.IsBuilding() {
 		t.Fatal("expected BuildInProgress to be false after build finishes")
 	}
 }
@@ -280,9 +290,9 @@ func TestBuildToolDirtyFlagClearedOnSuccess(t *testing.T) {
 			Duration: time.Second,
 		},
 	}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
-	srv.store.SetDirty()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+	store.SetDirty()
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleBuild(context.Background(), req)
@@ -293,7 +303,7 @@ func TestBuildToolDirtyFlagClearedOnSuccess(t *testing.T) {
 		t.Fatalf("unexpected tool error: %s", extractText(t, result))
 	}
 
-	if srv.store.IsDirty() {
+	if store.IsDirty() {
 		t.Fatal("expected dirty flag to be cleared after successful build")
 	}
 }
@@ -306,8 +316,8 @@ func TestBuildToolKilledSetsDirty(t *testing.T) {
 			Killed:   true,
 		},
 	}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleBuild(context.Background(), req)
@@ -318,7 +328,7 @@ func TestBuildToolKilledSetsDirty(t *testing.T) {
 		t.Fatalf("unexpected tool error: %s", extractText(t, result))
 	}
 
-	if !srv.store.IsDirty() {
+	if !store.IsDirty() {
 		t.Fatal("expected dirty flag to be set after killed build")
 	}
 }
@@ -330,9 +340,9 @@ func TestBuildToolDirtyFlagNotClearedOnFailure(t *testing.T) {
 			Duration: time.Second,
 		},
 	}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
-	srv.store.SetDirty()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+	store.SetDirty()
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleBuild(context.Background(), req)
@@ -343,14 +353,14 @@ func TestBuildToolDirtyFlagNotClearedOnFailure(t *testing.T) {
 		t.Fatalf("unexpected tool error: %s", extractText(t, result))
 	}
 
-	if !srv.store.IsDirty() {
+	if !store.IsDirty() {
 		t.Fatal("expected dirty flag to remain set after failed build")
 	}
 }
 
 func TestGetErrorsNoErrors(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
+	srv, _ := newTestServer(fb)
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleGetErrors(context.Background(), req)
@@ -373,18 +383,18 @@ func TestGetErrorsNoErrors(t *testing.T) {
 
 func TestGetErrorsWithErrors(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	// Simulate a build that produced errors.
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	errs := []diagnostics.Diagnostic{
 		{File: "main.cpp", Line: 10, Column: 5, Severity: diagnostics.SeverityError, Message: "undeclared identifier 'x'", Code: "undeclared_var"},
 		{File: "util.cpp", Line: 20, Severity: diagnostics.SeverityError, Message: "missing semicolon"},
 	}
-	srv.store.FinishBuild(1, time.Second, errs, nil)
+	store.FinishBuild(1, time.Second, errs, nil)
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleGetErrors(context.Background(), req)
@@ -432,8 +442,8 @@ func TestGetErrorsWithErrors(t *testing.T) {
 
 func TestGetErrorsCapsAt20(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	// Create 25 errors.
 	var errs []diagnostics.Diagnostic
@@ -446,10 +456,10 @@ func TestGetErrorsCapsAt20(t *testing.T) {
 		})
 	}
 
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	srv.store.FinishBuild(1, time.Second, errs, nil)
+	store.FinishBuild(1, time.Second, errs, nil)
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleGetErrors(context.Background(), req)
@@ -469,18 +479,18 @@ func TestGetErrorsCapsAt20(t *testing.T) {
 
 func TestGetErrorsOmitsEmptyFields(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	// Create an error with minimal fields — column=0, code="" should be omitted.
 	errs := []diagnostics.Diagnostic{
 		{File: "a.cpp", Line: 1, Severity: diagnostics.SeverityError, Message: "fail"},
 	}
 
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	srv.store.FinishBuild(1, time.Second, errs, nil)
+	store.FinishBuild(1, time.Second, errs, nil)
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleGetErrors(context.Background(), req)
@@ -513,8 +523,8 @@ func TestBuildResponseJSONShape(t *testing.T) {
 			Duration: 1500 * time.Millisecond,
 		},
 	}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleBuild(context.Background(), req)
@@ -546,7 +556,7 @@ func TestBuildResponseJSONShape(t *testing.T) {
 }
 
 func TestBuildHealthUnconfigured(t *testing.T) {
-	srv := newTestServer(&fakeBuilder{})
+	srv, _ := newTestServer(&fakeBuilder{})
 	result, err := srv.handleBuildHealth(context.Background(), mcp.ReadResourceRequest{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -571,8 +581,8 @@ func TestBuildHealthUnconfigured(t *testing.T) {
 }
 
 func TestBuildHealthConfigured(t *testing.T) {
-	srv := newTestServer(&fakeBuilder{})
-	srv.store.SetConfigured()
+	srv, store := newTestServer(&fakeBuilder{})
+	store.SetConfigured()
 	result, err := srv.handleBuildHealth(context.Background(), mcp.ReadResourceRequest{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -584,9 +594,9 @@ func TestBuildHealthConfigured(t *testing.T) {
 }
 
 func TestBuildHealthDirty(t *testing.T) {
-	srv := newTestServer(&fakeBuilder{})
-	srv.store.SetConfigured()
-	srv.store.SetDirty()
+	srv, store := newTestServer(&fakeBuilder{})
+	store.SetConfigured()
+	store.SetDirty()
 	result, err := srv.handleBuildHealth(context.Background(), mcp.ReadResourceRequest{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -598,12 +608,12 @@ func TestBuildHealthDirty(t *testing.T) {
 }
 
 func TestBuildHealthAfterBuild(t *testing.T) {
-	srv := newTestServer(&fakeBuilder{})
-	srv.store.SetConfigured()
-	if err := srv.store.StartBuild(); err != nil {
+	srv, store := newTestServer(&fakeBuilder{})
+	store.SetConfigured()
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	srv.store.FinishBuild(0, time.Second, nil, nil)
+	store.FinishBuild(0, time.Second, nil, nil)
 
 	result, err := srv.handleBuildHealth(context.Background(), mcp.ReadResourceRequest{})
 	if err != nil {
@@ -616,13 +626,13 @@ func TestBuildHealthAfterBuild(t *testing.T) {
 }
 
 func TestBuildHealthAfterFailedBuild(t *testing.T) {
-	srv := newTestServer(&fakeBuilder{})
-	srv.store.SetConfigured()
-	if err := srv.store.StartBuild(); err != nil {
+	srv, store := newTestServer(&fakeBuilder{})
+	store.SetConfigured()
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	errs := []diagnostics.Diagnostic{{Severity: diagnostics.SeverityError, Message: "fail"}}
-	srv.store.FinishBuild(1, time.Second, errs, nil)
+	store.FinishBuild(1, time.Second, errs, nil)
 
 	result, err := srv.handleBuildHealth(context.Background(), mcp.ReadResourceRequest{})
 	if err != nil {
@@ -638,17 +648,17 @@ func TestBuildHealthAfterFailedBuild(t *testing.T) {
 
 func TestGetWarningsNoFilter(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	warns := []diagnostics.Diagnostic{
 		{File: "main.cpp", Line: 10, Severity: diagnostics.SeverityWarning, Message: "unused variable", Code: "-Wunused-variable"},
 		{File: "util.cpp", Line: 20, Severity: diagnostics.SeverityWarning, Message: "implicit conversion", Code: "-Wimplicit-conversion"},
 	}
-	srv.store.FinishBuild(0, time.Second, nil, warns)
+	store.FinishBuild(0, time.Second, nil, warns)
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleGetWarnings(context.Background(), req)
@@ -674,17 +684,17 @@ func TestGetWarningsNoFilter(t *testing.T) {
 
 func TestGetWarningsCodeFilter(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	warns := []diagnostics.Diagnostic{
 		{File: "main.cpp", Line: 10, Severity: diagnostics.SeverityWarning, Message: "unused variable", Code: "-Wunused-variable"},
 		{File: "util.cpp", Line: 20, Severity: diagnostics.SeverityWarning, Message: "implicit conversion", Code: "-Wimplicit-conversion"},
 	}
-	srv.store.FinishBuild(0, time.Second, nil, warns)
+	store.FinishBuild(0, time.Second, nil, warns)
 
 	// "-Wunused" should match "-Wunused-variable" via substring.
 	req := makeCallToolRequest(map[string]interface{}{"filter": "-Wunused"})
@@ -708,17 +718,17 @@ func TestGetWarningsCodeFilter(t *testing.T) {
 
 func TestGetWarningsFileFilter(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	warns := []diagnostics.Diagnostic{
 		{File: "src/core/foo.cpp", Line: 10, Severity: diagnostics.SeverityWarning, Message: "unused variable", Code: "-Wunused"},
 		{File: "src/gui/bar.cpp", Line: 20, Severity: diagnostics.SeverityWarning, Message: "implicit conversion", Code: "-Wimplicit"},
 	}
-	srv.store.FinishBuild(0, time.Second, nil, warns)
+	store.FinishBuild(0, time.Second, nil, warns)
 
 	// "src/core" should match "src/core/foo.cpp" via file substring.
 	req := makeCallToolRequest(map[string]interface{}{"filter": "src/core"})
@@ -742,16 +752,16 @@ func TestGetWarningsFileFilter(t *testing.T) {
 
 func TestGetWarningsNoMatches(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	warns := []diagnostics.Diagnostic{
 		{File: "main.cpp", Line: 10, Severity: diagnostics.SeverityWarning, Message: "unused", Code: "-Wunused"},
 	}
-	srv.store.FinishBuild(0, time.Second, nil, warns)
+	store.FinishBuild(0, time.Second, nil, warns)
 
 	req := makeCallToolRequest(map[string]interface{}{"filter": "nonexistent"})
 	result, err := srv.handleGetWarnings(context.Background(), req)
@@ -774,7 +784,7 @@ func TestGetWarningsNoMatches(t *testing.T) {
 
 func TestGetWarningsEmptyState(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
+	srv, _ := newTestServer(fb)
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleGetWarnings(context.Background(), req)
@@ -805,7 +815,7 @@ func TestConfigureSuccess(t *testing.T) {
 			Stderr:   "",
 		},
 	}
-	srv := newTestServer(fb)
+	srv, store := newTestServer(fb)
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleConfigure(context.Background(), req)
@@ -829,8 +839,8 @@ func TestConfigureSuccess(t *testing.T) {
 	}
 
 	// State should now be configured.
-	if srv.store.GetPhase() != state.PhaseConfigured {
-		t.Fatalf("expected PhaseConfigured after successful configure, got %d", srv.store.GetPhase())
+	if store.GetPhase() != state.PhaseConfigured {
+		t.Fatalf("expected PhaseConfigured after successful configure, got %d", store.GetPhase())
 	}
 }
 
@@ -842,7 +852,7 @@ func TestConfigureFailedWithCMakeErrors(t *testing.T) {
 			Stderr:   "CMake Error at CMakeLists.txt:10 (find_package):\n  Could not find package Foo\nCMake Error at CMakeLists.txt:20:\n  Missing required library\n",
 		},
 	}
-	srv := newTestServer(fb)
+	srv, store := newTestServer(fb)
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleConfigure(context.Background(), req)
@@ -869,8 +879,8 @@ func TestConfigureFailedWithCMakeErrors(t *testing.T) {
 	}
 
 	// State should remain unconfigured.
-	if srv.store.GetPhase() != state.PhaseUnconfigured {
-		t.Fatalf("expected PhaseUnconfigured after failed configure, got %d", srv.store.GetPhase())
+	if store.GetPhase() != state.PhaseUnconfigured {
+		t.Fatalf("expected PhaseUnconfigured after failed configure, got %d", store.GetPhase())
 	}
 }
 
@@ -878,7 +888,7 @@ func TestConfigurePassesArgs(t *testing.T) {
 	fb := &fakeBuilder{
 		configureResult: &builder.BuildResult{ExitCode: 0},
 	}
-	srv := newTestServer(fb)
+	srv, _ := newTestServer(fb)
 
 	req := makeCallToolRequest(map[string]interface{}{
 		"cmake_args": []interface{}{"-DCMAKE_BUILD_TYPE=Debug", "-DFOO=bar"},
@@ -905,16 +915,16 @@ func TestCleanSuccess(t *testing.T) {
 	fb := &fakeBuilder{
 		cleanResult: &builder.BuildResult{ExitCode: 0},
 	}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	// First, perform a build so we are in PhaseBuilt.
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	srv.store.FinishBuild(0, time.Second, nil, nil)
-	if srv.store.GetPhase() != state.PhaseBuilt {
-		t.Fatalf("expected PhaseBuilt, got %d", srv.store.GetPhase())
+	store.FinishBuild(0, time.Second, nil, nil)
+	if store.GetPhase() != state.PhaseBuilt {
+		t.Fatalf("expected PhaseBuilt, got %d", store.GetPhase())
 	}
 
 	req := makeCallToolRequest(nil)
@@ -939,8 +949,8 @@ func TestCleanSuccess(t *testing.T) {
 	}
 
 	// State should be back to configured.
-	if srv.store.GetPhase() != state.PhaseConfigured {
-		t.Fatalf("expected PhaseConfigured after clean, got %d", srv.store.GetPhase())
+	if store.GetPhase() != state.PhaseConfigured {
+		t.Fatalf("expected PhaseConfigured after clean, got %d", store.GetPhase())
 	}
 }
 
@@ -948,8 +958,8 @@ func TestCleanWhenNotBuilt(t *testing.T) {
 	fb := &fakeBuilder{
 		cleanResult: &builder.BuildResult{ExitCode: 0},
 	}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleClean(context.Background(), req)
@@ -974,7 +984,7 @@ func TestCleanFailure(t *testing.T) {
 	fb := &fakeBuilder{
 		cleanErr: context.DeadlineExceeded,
 	}
-	srv := newTestServer(fb)
+	srv, _ := newTestServer(fb)
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleClean(context.Background(), req)
@@ -992,11 +1002,11 @@ func TestGetChangedFilesHandler(t *testing.T) {
 	// This tests the handler wiring with the store's LastSuccessfulBuildTime.
 	// The actual change detection is tested in changes/detector_test.go.
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
+	srv, _ := newTestServer(fb)
 	// Use a temp dir as source so we can control file layout.
 	tmpDir := t.TempDir()
-	srv.cfg.SourceDir = tmpDir
-	srv.cfg.BuildDir = tmpDir + "/build"
+	srv.registry.defaultInstance().cfg.SourceDir = tmpDir
+	srv.registry.defaultInstance().cfg.BuildDir = tmpDir + "/build"
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleGetChangedFiles(context.Background(), req)
@@ -1022,10 +1032,10 @@ func TestGetChangedFilesHandler(t *testing.T) {
 
 func TestGetBuildGraphMissingFile(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
+	srv, _ := newTestServer(fb)
 	tmpDir := t.TempDir()
-	srv.cfg.BuildDir = tmpDir + "/nonexistent-build"
-	srv.cfg.SourceDir = tmpDir
+	srv.registry.defaultInstance().cfg.BuildDir = tmpDir + "/nonexistent-build"
+	srv.registry.defaultInstance().cfg.SourceDir = tmpDir
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleGetBuildGraph(context.Background(), req)
@@ -1077,8 +1087,8 @@ func TestParseCMakeMessagesWithErrors(t *testing.T) {
 
 func TestSuggestFixValidIndex(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	// Create a temp source file with 25 lines.
 	tmpDir := t.TempDir()
@@ -1092,13 +1102,13 @@ func TestSuggestFixValidIndex(t *testing.T) {
 	}
 
 	// Populate store with an error pointing to the file, line 15.
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	errs := []diagnostics.Diagnostic{
 		{File: srcFile, Line: 15, Column: 3, Severity: diagnostics.SeverityError, Message: "undeclared identifier"},
 	}
-	srv.store.FinishBuild(1, time.Second, errs, nil)
+	store.FinishBuild(1, time.Second, errs, nil)
 
 	req := makeCallToolRequest(map[string]interface{}{"error_index": float64(0)})
 	result, err := srv.handleSuggestFix(context.Background(), req)
@@ -1138,17 +1148,17 @@ func TestSuggestFixValidIndex(t *testing.T) {
 
 func TestSuggestFixOutOfBounds(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	// Populate store with 1 error.
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	errs := []diagnostics.Diagnostic{
 		{File: "main.cpp", Line: 10, Severity: diagnostics.SeverityError, Message: "error"},
 	}
-	srv.store.FinishBuild(1, time.Second, errs, nil)
+	store.FinishBuild(1, time.Second, errs, nil)
 
 	req := makeCallToolRequest(map[string]interface{}{"error_index": float64(5)})
 	result, err := srv.handleSuggestFix(context.Background(), req)
@@ -1166,17 +1176,17 @@ func TestSuggestFixOutOfBounds(t *testing.T) {
 
 func TestSuggestFixFileNotFound(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	// Populate store with an error pointing to a nonexistent file.
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	errs := []diagnostics.Diagnostic{
 		{File: "/nonexistent/path/to/file.cpp", Line: 10, Severity: diagnostics.SeverityError, Message: "error"},
 	}
-	srv.store.FinishBuild(1, time.Second, errs, nil)
+	store.FinishBuild(1, time.Second, errs, nil)
 
 	req := makeCallToolRequest(map[string]interface{}{"error_index": float64(0)})
 	result, err := srv.handleSuggestFix(context.Background(), req)
@@ -1194,8 +1204,8 @@ func TestSuggestFixFileNotFound(t *testing.T) {
 
 func TestSuggestFixNearStartOfFile(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	// Create a temp source file with 25 lines.
 	tmpDir := t.TempDir()
@@ -1209,13 +1219,13 @@ func TestSuggestFixNearStartOfFile(t *testing.T) {
 	}
 
 	// Error on line 2 — start_line should clamp to 1.
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	errs := []diagnostics.Diagnostic{
 		{File: srcFile, Line: 2, Severity: diagnostics.SeverityError, Message: "error near start"},
 	}
-	srv.store.FinishBuild(1, time.Second, errs, nil)
+	store.FinishBuild(1, time.Second, errs, nil)
 
 	req := makeCallToolRequest(map[string]interface{}{"error_index": float64(0)})
 	result, err := srv.handleSuggestFix(context.Background(), req)
@@ -1242,8 +1252,8 @@ func TestSuggestFixNearStartOfFile(t *testing.T) {
 
 func TestSuggestFixNearEndOfFile(t *testing.T) {
 	fb := &fakeBuilder{}
-	srv := newTestServer(fb)
-	srv.store.SetConfigured()
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	// Create a temp source file with 15 lines.
 	tmpDir := t.TempDir()
@@ -1257,13 +1267,13 @@ func TestSuggestFixNearEndOfFile(t *testing.T) {
 	}
 
 	// Error on last line (15) — end_line should clamp to 15.
-	if err := srv.store.StartBuild(); err != nil {
+	if err := store.StartBuild(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	errs := []diagnostics.Diagnostic{
 		{File: srcFile, Line: 15, Severity: diagnostics.SeverityError, Message: "error near end"},
 	}
-	srv.store.FinishBuild(1, time.Second, errs, nil)
+	store.FinishBuild(1, time.Second, errs, nil)
 
 	req := makeCallToolRequest(map[string]interface{}{"error_index": float64(0)})
 	result, err := srv.handleSuggestFix(context.Background(), req)

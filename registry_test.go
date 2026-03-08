@@ -181,6 +181,20 @@ func TestStoreStatusTokenDirty(t *testing.T) {
 	}
 }
 
+func TestStoreStatusTokenBuildingTakesPrecedenceOverDirty(t *testing.T) {
+	s := state.NewStore()
+	s.SetConfigured()
+	s.SetDirty()
+	if err := s.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Both dirty and building — building should win.
+	token := storeStatusToken(s)
+	if token != "building" {
+		t.Fatalf("expected 'building' (takes precedence over dirty), got %q", token)
+	}
+}
+
 func TestStoreStatusTokenDirtyTakesPrecedenceOverPhase(t *testing.T) {
 	s := state.NewStore()
 	s.SetConfigured()

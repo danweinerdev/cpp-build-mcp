@@ -24,9 +24,18 @@ import (
 
 // mcpServer holds the dependencies shared across MCP tool handlers.
 type mcpServer struct {
-	builder builder.Builder
-	store   *state.Store
-	cfg     *config.Config
+	registry *configRegistry
+}
+
+// resolveConfig extracts the optional "config" parameter from a tool request
+// and returns the corresponding configInstance. If no config parameter is
+// provided, the default instance is returned.
+func (srv *mcpServer) resolveConfig(req mcp.CallToolRequest) (*configInstance, error) {
+	name := req.GetString("config", "")
+	if name == "" {
+		return srv.registry.defaultInstance(), nil
+	}
+	return srv.registry.get(name)
 }
 
 func main() {
@@ -42,10 +51,20 @@ func main() {
 
 	store := state.NewStore()
 
-	srv := &mcpServer{
+	registry := newConfigRegistry("default")
+	inst := &configInstance{
+		name:    "default",
+		cfg:     cfg,
 		builder: b,
 		store:   store,
-		cfg:     cfg,
+	}
+	registry.add(inst)
+
+	// Run toolchain detection eagerly at startup.
+	resolveToolchain(inst)
+
+	srv := &mcpServer{
+		registry: registry,
 	}
 
 	s := server.NewMCPServer("cpp-build-mcp", "0.1.0",
@@ -197,12 +216,12 @@ type diagnosticEntry struct {
 // compile_commands.json and the system compiler. When the detected toolchain
 // is "gcc-legacy" (GCC < 10 without JSON diagnostics), diagnostic flag
 // injection is disabled to prevent passing unsupported flags.
-func (srv *mcpServer) resolveToolchain() string {
-	tc := srv.cfg.Toolchain
+func resolveToolchain(inst *configInstance) string {
+	tc := inst.cfg.Toolchain
 	if tc == "auto" || tc == "" {
-		tc = builder.DetectToolchain(srv.cfg.BuildDir)
+		tc = builder.DetectToolchain(inst.cfg.BuildDir)
 		if tc == "gcc-legacy" {
-			srv.cfg.InjectDiagnosticFlags = false
+			inst.cfg.InjectDiagnosticFlags = false
 			slog.Warn("detected GCC < 10, disabling diagnostic flag injection")
 		}
 	}
@@ -210,15 +229,20 @@ func (srv *mcpServer) resolveToolchain() string {
 }
 
 func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	inst, err := srv.resolveConfig(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	// Check if build can start (validates configured state and no build in progress).
-	if err := srv.store.StartBuild(); err != nil {
+	if err := inst.store.StartBuild(); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	// If the state is dirty, set the builder's dirty flag so it cleans first.
-	wasDirty := srv.store.IsDirty()
+	wasDirty := inst.store.IsDirty()
 	if wasDirty {
-		srv.builder.SetDirty(true)
+		inst.builder.SetDirty(true)
 	}
 
 	// Extract optional targets parameter.
@@ -237,15 +261,15 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 	jobs := req.GetInt("jobs", 0)
 
 	// Run the build.
-	result, err := srv.builder.Build(ctx, targets, jobs)
-	if err != nil {
+	result, buildErr := inst.builder.Build(ctx, targets, jobs)
+	if buildErr != nil {
 		// Process spawn error — finalize state and return tool error.
-		srv.store.FinishBuild(-1, 0, nil, nil)
-		return mcp.NewToolResultError("build failed to start: " + err.Error()), nil
+		inst.store.FinishBuild(-1, 0, nil, nil)
+		return mcp.NewToolResultError("build failed to start: " + buildErr.Error()), nil
 	}
 
 	// Parse diagnostics from build output.
-	tc := srv.resolveToolchain()
+	tc := resolveToolchain(inst)
 	diags, _ := diagnostics.Parse(tc, result.Stdout, result.Stderr)
 
 	// Split diagnostics into errors and warnings.
@@ -263,15 +287,15 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 
 	// If the build was killed (timeout/cancel), mark state as dirty.
 	if result.Killed {
-		srv.store.SetDirty()
+		inst.store.SetDirty()
 	}
 
 	// Update state with build results.
-	srv.store.FinishBuild(result.ExitCode, result.Duration, errs, warns)
+	inst.store.FinishBuild(result.ExitCode, result.Duration, errs, warns)
 
 	// Clear dirty if the build succeeded, was dirty before, and was not killed.
 	if wasDirty && result.ExitCode == 0 && !result.Killed {
-		srv.store.ClearDirty()
+		inst.store.ClearDirty()
 	}
 
 	// Build the response.
@@ -283,16 +307,21 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 		FilesCompiled: parseFilesCompiled(result.Stderr),
 	}
 
-	data, err := json.Marshal(resp)
-	if err != nil {
-		return mcp.NewToolResultError("failed to marshal response: " + err.Error()), nil
+	data, marshalErr := json.Marshal(resp)
+	if marshalErr != nil {
+		return mcp.NewToolResultError("failed to marshal response: " + marshalErr.Error()), nil
 	}
 
 	return mcp.NewToolResultText(string(data)), nil
 }
 
-func (srv *mcpServer) handleGetErrors(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	errs := srv.store.Errors()
+func (srv *mcpServer) handleGetErrors(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	inst, err := srv.resolveConfig(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	errs := inst.store.Errors()
 
 	// Cap at 20 diagnostics.
 	if len(errs) > 20 {
@@ -322,17 +351,23 @@ func (srv *mcpServer) handleGetErrors(_ context.Context, _ mcp.CallToolRequest) 
 }
 
 func (srv *mcpServer) handleBuildHealth(_ context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	inst := srv.registry.defaultInstance()
 	return []mcp.ResourceContents{
 		mcp.TextResourceContents{
 			URI:      "build://health",
 			MIMEType: "text/plain",
-			Text:     srv.store.Health(),
+			Text:     inst.store.Health(),
 		},
 	}, nil
 }
 
 func (srv *mcpServer) handleGetWarnings(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	warns := srv.store.Warnings()
+	inst, err := srv.resolveConfig(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	warns := inst.store.Warnings()
 
 	filter := req.GetString("filter", "")
 
@@ -374,6 +409,11 @@ func (srv *mcpServer) handleGetWarnings(_ context.Context, req mcp.CallToolReque
 }
 
 func (srv *mcpServer) handleConfigure(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	inst, err := srv.resolveConfig(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	// Extract optional cmake_args parameter.
 	var args []string
 	if rawArgs, ok := req.GetArguments()["cmake_args"]; ok {
@@ -386,9 +426,9 @@ func (srv *mcpServer) handleConfigure(ctx context.Context, req mcp.CallToolReque
 		}
 	}
 
-	result, err := srv.builder.Configure(ctx, args)
-	if err != nil {
-		return mcp.NewToolResultError("configure failed to start: " + err.Error()), nil
+	result, configErr := inst.builder.Configure(ctx, args)
+	if configErr != nil {
+		return mcp.NewToolResultError("configure failed to start: " + configErr.Error()), nil
 	}
 
 	// Parse CMake output for error/warning messages.
@@ -397,7 +437,7 @@ func (srv *mcpServer) handleConfigure(ctx context.Context, req mcp.CallToolReque
 
 	success := result.ExitCode == 0
 	if success {
-		srv.store.SetConfigured()
+		inst.store.SetConfigured()
 	}
 
 	resp := configureResponse{
@@ -406,9 +446,9 @@ func (srv *mcpServer) handleConfigure(ctx context.Context, req mcp.CallToolReque
 		Messages:   messages,
 	}
 
-	data, err := json.Marshal(resp)
-	if err != nil {
-		return mcp.NewToolResultError("failed to marshal response: " + err.Error()), nil
+	data, marshalErr := json.Marshal(resp)
+	if marshalErr != nil {
+		return mcp.NewToolResultError("failed to marshal response: " + marshalErr.Error()), nil
 	}
 
 	return mcp.NewToolResultText(string(data)), nil
@@ -454,6 +494,11 @@ func parseCMakeMessages(output string) ([]string, int) {
 }
 
 func (srv *mcpServer) handleClean(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	inst, err := srv.resolveConfig(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	// Extract optional targets parameter.
 	var targets []string
 	if rawTargets, ok := req.GetArguments()["targets"]; ok {
@@ -466,34 +511,39 @@ func (srv *mcpServer) handleClean(ctx context.Context, req mcp.CallToolRequest) 
 		}
 	}
 
-	result, err := srv.builder.Clean(ctx, targets)
-	if err != nil {
-		return mcp.NewToolResultError("clean failed: " + err.Error()), nil
+	result, cleanErr := inst.builder.Clean(ctx, targets)
+	if cleanErr != nil {
+		return mcp.NewToolResultError("clean failed: " + cleanErr.Error()), nil
 	}
 
 	if result.ExitCode != 0 {
 		return mcp.NewToolResultError("clean failed with exit code " + strings.TrimSpace(result.Stderr)), nil
 	}
 
-	srv.store.SetClean()
+	inst.store.SetClean()
 
 	resp := cleanResponse{
 		Success: true,
 		Message: "Clean complete",
 	}
 
-	data, err := json.Marshal(resp)
-	if err != nil {
-		return mcp.NewToolResultError("failed to marshal response: " + err.Error()), nil
+	data, marshalErr := json.Marshal(resp)
+	if marshalErr != nil {
+		return mcp.NewToolResultError("failed to marshal response: " + marshalErr.Error()), nil
 	}
 
 	return mcp.NewToolResultText(string(data)), nil
 }
 
-func (srv *mcpServer) handleGetChangedFiles(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	since := srv.store.LastSuccessfulBuildTime()
+func (srv *mcpServer) handleGetChangedFiles(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	inst, err := srv.resolveConfig(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
-	files, method, err := changes.DetectChanges(srv.cfg.SourceDir, srv.cfg.BuildDir, since)
+	since := inst.store.LastSuccessfulBuildTime()
+
+	files, method, err := changes.DetectChanges(inst.cfg.SourceDir, inst.cfg.BuildDir, since)
 	if err != nil {
 		return mcp.NewToolResultError("failed to detect changes: " + err.Error()), nil
 	}
@@ -516,8 +566,13 @@ func (srv *mcpServer) handleGetChangedFiles(_ context.Context, _ mcp.CallToolReq
 	return mcp.NewToolResultText(string(data)), nil
 }
 
-func (srv *mcpServer) handleGetBuildGraph(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	summary, err := graph.ReadSummary(srv.cfg.BuildDir, srv.cfg.SourceDir)
+func (srv *mcpServer) handleGetBuildGraph(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	inst, err := srv.resolveConfig(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	summary, err := graph.ReadSummary(inst.cfg.BuildDir, inst.cfg.SourceDir)
 	if err != nil {
 		return mcp.NewToolResultError("failed to read build graph: " + err.Error()), nil
 	}
@@ -531,12 +586,17 @@ func (srv *mcpServer) handleGetBuildGraph(_ context.Context, _ mcp.CallToolReque
 }
 
 func (srv *mcpServer) handleSuggestFix(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	inst, err := srv.resolveConfig(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
 	idx := req.GetInt("error_index", -1)
 	if idx < 0 {
 		return mcp.NewToolResultError("error_index is required and must be >= 0"), nil
 	}
 
-	errs := srv.store.Errors()
+	errs := inst.store.Errors()
 	if idx >= len(errs) {
 		return mcp.NewToolResultError(fmt.Sprintf("error_index %d out of range (have %d errors)", idx, len(errs))), nil
 	}
