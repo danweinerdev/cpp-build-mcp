@@ -89,7 +89,9 @@ func TestFinishBuildUpdatesState(t *testing.T) {
 		t.Fatal("expected BuildInProgress to be false after FinishBuild")
 	}
 
-	// Access internal state for detailed checks.
+	// White-box: access internal state for detailed checks. Safe because all
+	// public method calls above have returned and released their locks before
+	// we acquire this RLock. Do not interleave with public method calls.
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -121,6 +123,7 @@ func TestFinishBuildWithExitZeroUpdatesSuccessTime(t *testing.T) {
 	s.FinishBuild(0, time.Second, nil, nil)
 	after := time.Now()
 
+	// White-box: safe because FinishBuild has returned and released its lock.
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -142,6 +145,7 @@ func TestFinishBuildWithNonZeroExitDoesNotUpdateSuccessTime(t *testing.T) {
 
 	s.FinishBuild(2, time.Second, nil, nil)
 
+	// White-box: safe because FinishBuild has returned and released its lock.
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -194,6 +198,8 @@ func TestSetCleanResetsToConfigured(t *testing.T) {
 		t.Fatalf("expected nil warnings after SetClean, got %v", got)
 	}
 
+	// White-box: safe because Errors()/Warnings() above have returned and
+	// released their RLocks before we acquire this one.
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.state.ErrorCount != 0 {
@@ -318,6 +324,52 @@ func TestWarningsReturnsCopy(t *testing.T) {
 	got2 := s.Warnings()
 	if got2[0].Message == "mutated" {
 		t.Fatal("Warnings() should return a copy, but internal state was mutated")
+	}
+}
+
+func TestKillRecoverySequence(t *testing.T) {
+	s := NewStore()
+	s.SetConfigured()
+
+	// Start a build, simulate kill by setting dirty without finishing.
+	if err := s.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s.SetDirty()
+	// Simulate the killed build finishing with non-zero exit.
+	s.FinishBuild(-1, time.Second, nil, nil)
+
+	if !s.IsDirty() {
+		t.Fatal("expected dirty after killed build")
+	}
+
+	// Clear dirty (builder would do this after --clean-first).
+	s.ClearDirty()
+	if s.IsDirty() {
+		t.Fatal("expected not dirty after ClearDirty")
+	}
+
+	// Should be able to start a new build.
+	if err := s.StartBuild(); err != nil {
+		t.Fatalf("expected to start build after recovery, got: %v", err)
+	}
+	s.FinishBuild(0, time.Second, nil, nil)
+	if s.GetPhase() != PhaseBuilt {
+		t.Fatalf("expected PhaseBuilt after recovery build, got %d", s.GetPhase())
+	}
+}
+
+func TestSetCleanDoesNotClearDirty(t *testing.T) {
+	s := NewStore()
+	s.SetConfigured()
+	s.SetDirty()
+	s.SetClean()
+
+	if !s.IsDirty() {
+		t.Fatal("SetClean should not clear Dirty flag — they are managed independently")
+	}
+	if s.GetPhase() != PhaseConfigured {
+		t.Fatalf("expected PhaseConfigured after SetClean, got %d", s.GetPhase())
 	}
 }
 

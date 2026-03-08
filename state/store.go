@@ -30,7 +30,8 @@ type BuildState struct {
 	Warnings                []diagnostics.Diagnostic
 	ErrorCount              int
 	WarningCount            int
-	Dirty                   bool
+	DirtyFiles              []string // files changed since last successful build (populated by get_changed_files)
+	Dirty                   bool     // true if previous build was killed (lock files may exist)
 	BuildInProgress         bool
 }
 
@@ -59,6 +60,10 @@ func (s *Store) SetConfigured() {
 
 // StartBuild marks a build as in progress. It returns an error if the project
 // is not yet configured or if a build is already running.
+//
+// The caller is responsible for calling FinishBuild when the build completes
+// (including on error/panic). If FinishBuild is never called, BuildInProgress
+// will remain true and all subsequent StartBuild calls will fail.
 func (s *Store) StartBuild() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -80,9 +85,11 @@ func (s *Store) FinishBuild(exitCode int, duration time.Duration, errs, warnings
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now()
+
 	s.state.BuildInProgress = false
 	s.state.Phase = PhaseBuilt
-	s.state.LastBuildTime = time.Now()
+	s.state.LastBuildTime = now
 	s.state.LastExitCode = exitCode
 	s.state.LastDuration = duration
 	s.state.Errors = errs
@@ -91,7 +98,7 @@ func (s *Store) FinishBuild(exitCode int, duration time.Duration, errs, warnings
 	s.state.WarningCount = len(warnings)
 
 	if exitCode == 0 {
-		s.state.LastSuccessfulBuildTime = time.Now()
+		s.state.LastSuccessfulBuildTime = now
 	}
 }
 
@@ -143,6 +150,9 @@ func (s *Store) Warnings() []diagnostics.Diagnostic {
 }
 
 // Health returns a one-line summary of the current build health.
+// Dirty is checked before phase intentionally: a killed build that was cleaned
+// back to PhaseConfigured still needs the dirty warning surfaced so the next
+// build triggers --clean-first.
 func (s *Store) Health() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -170,7 +180,11 @@ func (s *Store) Health() string {
 }
 
 // SetClean resets the build state to PhaseConfigured and clears all
-// diagnostics and counts.
+// diagnostics and counts. It does NOT clear the Dirty flag — Dirty is
+// managed independently via SetDirty/ClearDirty.
+//
+// Callers must ensure SetConfigured has been called before SetClean;
+// otherwise this will advance an unconfigured project to PhaseConfigured.
 func (s *Store) SetClean() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

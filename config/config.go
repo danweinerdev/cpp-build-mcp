@@ -20,7 +20,10 @@ type Config struct {
 	Toolchain             string        `json:"toolchain"`              // "auto", "clang", "gcc", "msvc"
 	Generator             string        `json:"generator"`              // "ninja", "make"
 	CMakeArgs             []string      `json:"cmake_args"`
-	BuildTimeout          time.Duration `json:"build_timeout"`
+	// BuildTimeout is stored as time.Duration internally. Note: marshaling Config
+	// directly to JSON produces nanosecond integers, not duration strings. The
+	// on-disk config file format uses configJSON for human-readable round-tripping.
+	BuildTimeout time.Duration `json:"build_timeout"`
 	InjectDiagnosticFlags bool          `json:"inject_diagnostic_flags"`
 	DiagnosticSerialBuild bool          `json:"diagnostic_serial_build"`
 }
