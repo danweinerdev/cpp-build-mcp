@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -170,6 +171,23 @@ type diagnosticEntry struct {
 	Code     string `json:"code,omitempty"`
 }
 
+// resolveToolchain returns the effective toolchain string. If the configured
+// toolchain is "auto" or empty, it runs auto-detection against
+// compile_commands.json and the system compiler. When the detected toolchain
+// is "gcc-legacy" (GCC < 10 without JSON diagnostics), diagnostic flag
+// injection is disabled to prevent passing unsupported flags.
+func (srv *mcpServer) resolveToolchain() string {
+	tc := srv.cfg.Toolchain
+	if tc == "auto" || tc == "" {
+		tc = builder.DetectToolchain(srv.cfg.BuildDir)
+		if tc == "gcc-legacy" {
+			srv.cfg.InjectDiagnosticFlags = false
+			slog.Warn("detected GCC < 10, disabling diagnostic flag injection")
+		}
+	}
+	return tc
+}
+
 func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// Check if build can start (validates configured state and no build in progress).
 	if err := srv.store.StartBuild(); err != nil {
@@ -208,7 +226,8 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 	}
 
 	// Parse diagnostics from build output.
-	diags, _ := diagnostics.Parse(srv.cfg.Toolchain, result.Stdout, result.Stderr)
+	tc := srv.resolveToolchain()
+	diags, _ := diagnostics.Parse(tc, result.Stdout, result.Stderr)
 
 	// Split diagnostics into errors and warnings.
 	var errs, warns []diagnostics.Diagnostic
