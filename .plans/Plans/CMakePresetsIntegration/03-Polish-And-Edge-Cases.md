@@ -3,18 +3,18 @@ title: "Polish and Edge Cases"
 type: phase
 plan: CMakePresetsIntegration
 phase: 3
-status: planned
+status: in-progress
 created: 2026-03-08
 updated: 2026-03-08
 deliverable: "Hybrid mode fully working, all edge cases handled, E2E tests covering zero-config and hybrid scenarios"
 tasks:
   - id: "3.1"
     title: "Hybrid mode: presets with .cpp-build-mcp.json overrides"
-    status: planned
+    status: in-progress
     verification: "CMakePresets.json + .cpp-build-mcp.json with top-level build_timeout, inject_diagnostic_flags, and diagnostic_serial_build: all three fields applied to every preset-derived config. Preset names and binaryDir values not overridden by .cpp-build-mcp.json top-level fields. Single-config mode with top-level preset field (no CMakePresets.json) works: Config.Preset set, configure uses --preset. .cpp-build-mcp.json with default_config set to a valid preset name uses it as default. default_config set to a name not in presets produces an error."
   - id: "3.2"
     title: "Edge case hardening"
-    status: planned
+    status: in-progress
     verification: "Empty configurePresets array (valid file, no presets) → fallback to single default with warning. All presets filtered (all hidden or all multi-config generators) → fallback with distinct warning message. Preset binaryDir not specified (v3+ allows this) → preset skipped with slog.Warn. CMakePresets.json exists but is not valid JSON → startup error with descriptive message. CMakePresets.json with only buildPresets/testPresets (no configurePresets) → fallback to single default. Single preset after filtering → single-config mode with env vars applied (not multi-config suppression)."
   - id: "3.3"
     title: "Integration tests and structural verification"

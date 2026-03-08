@@ -269,6 +269,7 @@ func loadPresetsMetadata(dir string) ([]presetMetadata, error) {
 	for _, p := range allPresets {
 		// 6. Remove hidden presets.
 		if p.Hidden {
+			slog.Debug("skipping hidden preset", "preset", p.Name)
 			continue
 		}
 

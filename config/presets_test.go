@@ -941,6 +941,146 @@ func TestLoadPresetsMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("empty configurePresets returns non-nil empty slice", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": []
+		}`)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+		// Non-nil empty slice signals "file exists but no usable presets".
+		if result == nil {
+			t.Fatal("expected non-nil empty slice, got nil")
+		}
+		if len(result) != 0 {
+			t.Errorf("expected 0 presets, got %d", len(result))
+		}
+	})
+
+	t.Run("only buildPresets returns non-nil empty slice", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"buildPresets": [
+				{
+					"name": "build-debug",
+					"configurePreset": "debug"
+				}
+			]
+		}`)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+		// File exists but configurePresets is nil (absent from JSON).
+		// The allPresets slice will be nil/empty, producing a non-nil empty result.
+		if result == nil {
+			t.Fatal("expected non-nil empty slice, got nil")
+		}
+		if len(result) != 0 {
+			t.Errorf("expected 0 presets, got %d", len(result))
+		}
+	})
+
+	t.Run("invalid JSON returns error", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{not valid json!!!}`)
+
+		_, err := loadPresetsMetadata(dir)
+		if err == nil {
+			t.Fatal("loadPresetsMetadata() should have returned an error for invalid JSON")
+		}
+		errMsg := err.Error()
+		if !strings.Contains(errMsg, "CMakePresets.json") {
+			t.Errorf("error should mention CMakePresets.json, got: %s", errMsg)
+		}
+	})
+
+	t.Run("hidden preset logs debug with preset name", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "my-hidden-base",
+					"binaryDir": "${sourceDir}/build/base",
+					"generator": "Ninja",
+					"hidden": true
+				},
+				{
+					"name": "visible",
+					"binaryDir": "${sourceDir}/build/visible",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+
+		var buf bytes.Buffer
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+		origLogger := slog.Default()
+		slog.SetDefault(slog.New(handler))
+		defer slog.SetDefault(origLogger)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+
+		if len(result) != 1 {
+			t.Fatalf("got %d presets, want 1", len(result))
+		}
+		assertEqual(t, "result[0].Name", result[0].Name, "visible")
+
+		logOutput := buf.String()
+		if !strings.Contains(logOutput, "my-hidden-base") {
+			t.Errorf("expected debug log mentioning hidden preset name, got: %q", logOutput)
+		}
+		if !strings.Contains(logOutput, "hidden") {
+			t.Errorf("expected debug log mentioning 'hidden', got: %q", logOutput)
+		}
+	})
+
+	t.Run("all presets filtered returns non-nil empty slice", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "base",
+					"binaryDir": "${sourceDir}/build/base",
+					"generator": "Ninja",
+					"hidden": true
+				},
+				{
+					"name": "vs",
+					"binaryDir": "${sourceDir}/build/vs",
+					"generator": "Visual Studio 17 2022"
+				},
+				{
+					"name": "no-bd",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+		// All presets filtered by different reasons - should still return non-nil empty.
+		if result == nil {
+			t.Fatal("expected non-nil empty slice, got nil")
+		}
+		if len(result) != 0 {
+			t.Errorf("expected 0 presets, got %d", len(result))
+		}
+	})
+
 	t.Run("full happy path", func(t *testing.T) {
 		dir := t.TempDir()
 		writePresetsFile(t, dir, "CMakePresets.json", `{
