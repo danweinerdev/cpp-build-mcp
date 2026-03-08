@@ -1,7 +1,7 @@
 ---
 title: "Build Intelligence MCP Server"
 type: plan
-status: active
+status: complete
 created: 2026-03-07
 updated: 2026-03-07
 
@@ -29,7 +29,7 @@ phases:
     depends_on: [2]
   - id: 5
     title: "Polish"
-    status: planned
+    status: complete
     doc: "05-Polish.md"
     depends_on: [3, 4]
 ---
