@@ -247,7 +247,7 @@ func loadPresetsMetadata(dir string) ([]presetMetadata, error) {
 		slog.Warn("CMakePresets.json uses 'include' (v4+); included preset files are not read — some presets may not be discovered")
 	}
 	if userFile != nil && len(userFile.Include) > 0 {
-		slog.Warn("CMakePresets.json uses 'include' (v4+); included preset files are not read — some presets may not be discovered")
+		slog.Warn("CMakeUserPresets.json uses 'include' (v4+); included preset files are not read — some presets may not be discovered")
 	}
 
 	// 4. Merge user presets into project presets.

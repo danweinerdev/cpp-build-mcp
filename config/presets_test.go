@@ -336,6 +336,22 @@ func TestResolveInherits(t *testing.T) {
 		}
 	})
 
+	t.Run("three-node circular detection", func(t *testing.T) {
+		presets := []configurePreset{
+			{Name: "a", Inherits: json.RawMessage(`"b"`)},
+			{Name: "b", Inherits: json.RawMessage(`"c"`)},
+			{Name: "c", Inherits: json.RawMessage(`"a"`)},
+		}
+
+		_, err := resolveInherits(presets)
+		if err == nil {
+			t.Fatal("resolveInherits() should have returned an error for 3-node circular inherits")
+		}
+		if !strings.Contains(err.Error(), "circular") {
+			t.Errorf("error should mention circular, got: %v", err)
+		}
+	})
+
 	t.Run("generator inherits from parent", func(t *testing.T) {
 		presets := []configurePreset{
 			{Name: "child", BinaryDir: "/build/child", Inherits: json.RawMessage(`"parent"`)},
@@ -536,6 +552,32 @@ func TestMergePresets(t *testing.T) {
 			t.Fatalf("merged: got %d elements, want 1", len(merged))
 		}
 		assertEqual(t, "merged[0].Name", merged[0].Name, "A")
+	})
+
+	t.Run("partial overlap replaces collision and appends new", func(t *testing.T) {
+		project := []configurePreset{
+			{Name: "A", BinaryDir: "/project/a"},
+			{Name: "B", BinaryDir: "/project/b"},
+		}
+		user := []configurePreset{
+			{Name: "A", BinaryDir: "/user/a"},
+			{Name: "C", BinaryDir: "/user/c"},
+		}
+
+		merged := mergePresets(project, user)
+
+		if len(merged) != 3 {
+			t.Fatalf("merged: got %d elements, want 3", len(merged))
+		}
+		// A replaced by user version.
+		assertEqual(t, "merged[0].Name", merged[0].Name, "A")
+		assertEqual(t, "merged[0].BinaryDir", merged[0].BinaryDir, "/user/a")
+		// B unchanged from project.
+		assertEqual(t, "merged[1].Name", merged[1].Name, "B")
+		assertEqual(t, "merged[1].BinaryDir", merged[1].BinaryDir, "/project/b")
+		// C appended from user.
+		assertEqual(t, "merged[2].Name", merged[2].Name, "C")
+		assertEqual(t, "merged[2].BinaryDir", merged[2].BinaryDir, "/user/c")
 	})
 }
 
@@ -761,6 +803,48 @@ func TestLoadPresetsMetadata(t *testing.T) {
 		}
 
 		logOutput := buf.String()
+		if !strings.Contains(logOutput, "include") {
+			t.Errorf("expected warning about include field, got: %q", logOutput)
+		}
+	})
+
+	t.Run("user presets include field triggers warning", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/debug",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+		writePresetsFile(t, dir, "CMakeUserPresets.json", `{
+			"version": 4,
+			"include": ["user-extra.json"],
+			"configurePresets": []
+		}`)
+
+		var buf bytes.Buffer
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+		origLogger := slog.Default()
+		slog.SetDefault(slog.New(handler))
+		defer slog.SetDefault(origLogger)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+
+		if len(result) != 1 {
+			t.Fatalf("got %d presets, want 1", len(result))
+		}
+
+		logOutput := buf.String()
+		if !strings.Contains(logOutput, "CMakeUserPresets.json") {
+			t.Errorf("expected warning mentioning CMakeUserPresets.json, got: %q", logOutput)
+		}
 		if !strings.Contains(logOutput, "include") {
 			t.Errorf("expected warning about include field, got: %q", logOutput)
 		}
