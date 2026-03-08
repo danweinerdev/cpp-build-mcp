@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -161,4 +163,156 @@ func expandBinaryDir(binaryDir, dir, presetName string) (string, error) {
 	}
 
 	return expanded, nil
+}
+
+// generatorNormalizeMap maps CMake generator names to the short names used
+// in cpp-build-mcp configuration.
+var generatorNormalizeMap = map[string]string{
+	"Ninja":          "ninja",
+	"Unix Makefiles": "make",
+}
+
+// normalizeGenerator returns the normalized short name for a CMake generator.
+// Unknown or empty generators default to "ninja".
+func normalizeGenerator(gen string) string {
+	if short, ok := generatorNormalizeMap[gen]; ok {
+		return short
+	}
+	return "ninja"
+}
+
+// isMultiConfigGenerator returns true if the generator is a multi-config
+// generator that should be excluded from preset discovery.
+func isMultiConfigGenerator(gen string) bool {
+	if gen == "Ninja Multi-Config" {
+		return true
+	}
+	if strings.HasPrefix(gen, "Visual Studio") {
+		return true
+	}
+	return false
+}
+
+// readUserPresets reads CMakeUserPresets.json from dir.
+// Returns (nil, nil) if the file does not exist.
+func readUserPresets(dir string) (*presetsFile, error) {
+	return readPresetsFile(filepath.Join(dir, "CMakeUserPresets.json"))
+}
+
+// mergePresets produces a union of configure presets from project and user
+// files. When a user preset has the same name as a project preset, the user
+// preset replaces the project preset.
+func mergePresets(project, user []configurePreset) []configurePreset {
+	byName := make(map[string]int, len(project))
+	merged := make([]configurePreset, len(project))
+	copy(merged, project)
+	for i, p := range merged {
+		byName[p.Name] = i
+	}
+	for _, u := range user {
+		if idx, ok := byName[u.Name]; ok {
+			merged[idx] = u // user replaces project
+		} else {
+			merged = append(merged, u)
+			byName[u.Name] = len(merged) - 1
+		}
+	}
+	return merged
+}
+
+// loadPresetsMetadata reads CMakePresets.json (and optionally
+// CMakeUserPresets.json) from dir, resolves inheritance, filters out hidden
+// and multi-config generator presets, expands binaryDir macros, normalizes
+// generator names, and validates binaryDir uniqueness.
+//
+// Returns nil, nil if no CMakePresets.json exists in dir.
+func loadPresetsMetadata(dir string) ([]presetMetadata, error) {
+	// 1. Read project presets file.
+	projectFile, err := readPresetsFile(filepath.Join(dir, "CMakePresets.json"))
+	if err != nil {
+		return nil, err
+	}
+	if projectFile == nil {
+		return nil, nil // no presets file
+	}
+
+	// 2. Read user presets file.
+	userFile, err := readUserPresets(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Warn on include fields.
+	if len(projectFile.Include) > 0 {
+		slog.Warn("CMakePresets.json uses 'include' (v4+); included preset files are not read — some presets may not be discovered")
+	}
+	if userFile != nil && len(userFile.Include) > 0 {
+		slog.Warn("CMakePresets.json uses 'include' (v4+); included preset files are not read — some presets may not be discovered")
+	}
+
+	// 4. Merge user presets into project presets.
+	allPresets := projectFile.ConfigurePresets
+	if userFile != nil {
+		allPresets = mergePresets(allPresets, userFile.ConfigurePresets)
+	}
+
+	// 5. Resolve inherits.
+	allPresets, err = resolveInherits(allPresets)
+	if err != nil {
+		return nil, err
+	}
+
+	// 6-8. Filter and build result.
+	var result []presetMetadata
+	for _, p := range allPresets {
+		// 6. Remove hidden presets.
+		if p.Hidden {
+			continue
+		}
+
+		// 7. Remove multi-config generator presets.
+		if isMultiConfigGenerator(p.Generator) {
+			slog.Info("skipping multi-config generator preset", "preset", p.Name, "generator", p.Generator)
+			continue
+		}
+
+		// 8a. Expand binaryDir.
+		bd, err := expandBinaryDir(p.BinaryDir, dir, p.Name)
+		if err != nil {
+			slog.Warn("skipping preset with unresolvable binaryDir", "preset", p.Name, "error", err)
+			continue
+		}
+
+		// 8b. Skip presets with empty binaryDir.
+		if bd == "" {
+			slog.Warn("preset has no binaryDir", "preset", p.Name)
+			continue
+		}
+
+		// 8c. Normalize generator.
+		gen := normalizeGenerator(p.Generator)
+
+		result = append(result, presetMetadata{
+			Name:      p.Name,
+			BinaryDir: bd,
+			Generator: gen,
+		})
+	}
+
+	// 9. Validate binaryDir uniqueness.
+	bdOwner := make(map[string]string, len(result))
+	// Sort result by name first so error messages are deterministic.
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
+	for _, pm := range result {
+		if prev, ok := bdOwner[pm.BinaryDir]; ok {
+			return nil, fmt.Errorf(
+				"presets %q and %q share binaryDir %q — each preset must have a unique binaryDir",
+				prev, pm.Name, pm.BinaryDir)
+		}
+		bdOwner[pm.BinaryDir] = pm.Name
+	}
+
+	return result, nil
 }

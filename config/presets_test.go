@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,6 +64,9 @@ func TestReadPresetsFile(t *testing.T) {
 		assertEqual(t, "preset[0].BinaryDir", p0.BinaryDir, "${sourceDir}/build/debug")
 		assertEqual(t, "preset[0].Generator", p0.Generator, "Ninja")
 		assertBool(t, "preset[0].Hidden", p0.Hidden, false)
+		if p0.Inherits == nil {
+			t.Fatal("preset[0].Inherits should be non-nil (has inherits field)")
+		}
 
 		// Second preset: base.
 		p1 := pf.ConfigurePresets[1]
@@ -431,5 +436,469 @@ func TestExpandBinaryDir(t *testing.T) {
 		if err == nil {
 			t.Fatal("expandBinaryDir() should have returned an error for unknown macro")
 		}
+	})
+}
+
+func TestNormalizeGenerator(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"Ninja", "ninja"},
+		{"Unix Makefiles", "make"},
+		{"", "ninja"},
+		{"CustomGen", "ninja"},
+	}
+
+	for _, tc := range cases {
+		t.Run("input="+tc.input, func(t *testing.T) {
+			got := normalizeGenerator(tc.input)
+			assertEqual(t, "normalizeGenerator", got, tc.want)
+		})
+	}
+}
+
+func TestIsMultiConfigGenerator(t *testing.T) {
+	t.Run("Ninja Multi-Config excluded", func(t *testing.T) {
+		if !isMultiConfigGenerator("Ninja Multi-Config") {
+			t.Error("expected Ninja Multi-Config to be multi-config")
+		}
+	})
+
+	t.Run("Visual Studio 17 2022 excluded", func(t *testing.T) {
+		if !isMultiConfigGenerator("Visual Studio 17 2022") {
+			t.Error("expected Visual Studio 17 2022 to be multi-config")
+		}
+	})
+
+	t.Run("Ninja is not multi-config", func(t *testing.T) {
+		if isMultiConfigGenerator("Ninja") {
+			t.Error("expected Ninja to not be multi-config")
+		}
+	})
+
+	t.Run("Unix Makefiles is not multi-config", func(t *testing.T) {
+		if isMultiConfigGenerator("Unix Makefiles") {
+			t.Error("expected Unix Makefiles to not be multi-config")
+		}
+	})
+}
+
+func TestMergePresets(t *testing.T) {
+	t.Run("user preset shadows project preset", func(t *testing.T) {
+		project := []configurePreset{
+			{Name: "A", BinaryDir: "/project/build/a", Generator: "Ninja"},
+			{Name: "B", BinaryDir: "/project/build/b", Generator: "Ninja"},
+		}
+		user := []configurePreset{
+			{Name: "A", BinaryDir: "/user/build/a", Generator: "Unix Makefiles"},
+		}
+
+		merged := mergePresets(project, user)
+
+		if len(merged) != 2 {
+			t.Fatalf("merged: got %d elements, want 2", len(merged))
+		}
+		// User's A replaces project's A.
+		assertEqual(t, "merged[0].Name", merged[0].Name, "A")
+		assertEqual(t, "merged[0].BinaryDir", merged[0].BinaryDir, "/user/build/a")
+		assertEqual(t, "merged[0].Generator", merged[0].Generator, "Unix Makefiles")
+		// B is unchanged.
+		assertEqual(t, "merged[1].Name", merged[1].Name, "B")
+		assertEqual(t, "merged[1].BinaryDir", merged[1].BinaryDir, "/project/build/b")
+	})
+
+	t.Run("user preset adds new preset", func(t *testing.T) {
+		project := []configurePreset{
+			{Name: "A", BinaryDir: "/build/a"},
+		}
+		user := []configurePreset{
+			{Name: "C", BinaryDir: "/build/c"},
+		}
+
+		merged := mergePresets(project, user)
+
+		if len(merged) != 2 {
+			t.Fatalf("merged: got %d elements, want 2", len(merged))
+		}
+		assertEqual(t, "merged[0].Name", merged[0].Name, "A")
+		assertEqual(t, "merged[1].Name", merged[1].Name, "C")
+	})
+
+	t.Run("empty user presets returns project presets", func(t *testing.T) {
+		project := []configurePreset{
+			{Name: "A", BinaryDir: "/build/a"},
+		}
+
+		merged := mergePresets(project, nil)
+
+		if len(merged) != 1 {
+			t.Fatalf("merged: got %d elements, want 1", len(merged))
+		}
+		assertEqual(t, "merged[0].Name", merged[0].Name, "A")
+	})
+}
+
+func TestLoadPresetsMetadata(t *testing.T) {
+	t.Run("hidden presets excluded", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "base",
+					"binaryDir": "${sourceDir}/build/base",
+					"generator": "Ninja",
+					"hidden": true
+				},
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/debug",
+					"generator": "Ninja",
+					"hidden": false
+				}
+			]
+		}`)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+
+		if len(result) != 1 {
+			t.Fatalf("got %d presets, want 1", len(result))
+		}
+		assertEqual(t, "result[0].Name", result[0].Name, "debug")
+	})
+
+	t.Run("multi-config generator presets excluded with slog info", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "ninja-mc",
+					"binaryDir": "${sourceDir}/build/ninja-mc",
+					"generator": "Ninja Multi-Config"
+				},
+				{
+					"name": "vs2022",
+					"binaryDir": "${sourceDir}/build/vs",
+					"generator": "Visual Studio 17 2022"
+				},
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/debug",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+
+		var buf bytes.Buffer
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})
+		origLogger := slog.Default()
+		slog.SetDefault(slog.New(handler))
+		defer slog.SetDefault(origLogger)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+
+		if len(result) != 1 {
+			t.Fatalf("got %d presets, want 1", len(result))
+		}
+		assertEqual(t, "result[0].Name", result[0].Name, "debug")
+
+		logOutput := buf.String()
+		if !strings.Contains(logOutput, "ninja-mc") {
+			t.Errorf("expected slog.Info mentioning ninja-mc, got: %q", logOutput)
+		}
+		if !strings.Contains(logOutput, "vs2022") {
+			t.Errorf("expected slog.Info mentioning vs2022, got: %q", logOutput)
+		}
+	})
+
+	t.Run("user presets shadow project presets", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/project",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+		writePresetsFile(t, dir, "CMakeUserPresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/user",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+
+		if len(result) != 1 {
+			t.Fatalf("got %d presets, want 1", len(result))
+		}
+		assertEqual(t, "result[0].Name", result[0].Name, "debug")
+		// User's binaryDir should win.
+		wantBD := filepath.Join(dir, "build/user")
+		assertEqual(t, "result[0].BinaryDir", result[0].BinaryDir, wantBD)
+	})
+
+	t.Run("duplicate binaryDir returns error naming both presets", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "alpha",
+					"binaryDir": "${sourceDir}/build/same",
+					"generator": "Ninja"
+				},
+				{
+					"name": "beta",
+					"binaryDir": "${sourceDir}/build/same",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+
+		_, err := loadPresetsMetadata(dir)
+		if err == nil {
+			t.Fatal("loadPresetsMetadata() should have returned an error for duplicate binaryDir")
+		}
+
+		errMsg := err.Error()
+		if !strings.Contains(errMsg, `"alpha"`) || !strings.Contains(errMsg, `"beta"`) {
+			t.Errorf("error should name both presets, got: %s", errMsg)
+		}
+		if !strings.Contains(errMsg, "binaryDir") {
+			t.Errorf("error should mention binaryDir, got: %s", errMsg)
+		}
+	})
+
+	t.Run("generator normalization", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "ninja-preset",
+					"binaryDir": "${sourceDir}/build/ninja",
+					"generator": "Ninja"
+				},
+				{
+					"name": "make-preset",
+					"binaryDir": "${sourceDir}/build/make",
+					"generator": "Unix Makefiles"
+				},
+				{
+					"name": "empty-gen",
+					"binaryDir": "${sourceDir}/build/empty",
+					"generator": ""
+				}
+			]
+		}`)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+
+		if len(result) != 3 {
+			t.Fatalf("got %d presets, want 3", len(result))
+		}
+
+		// Results are sorted by name.
+		byName := make(map[string]presetMetadata, len(result))
+		for _, pm := range result {
+			byName[pm.Name] = pm
+		}
+
+		assertEqual(t, "empty-gen.Generator", byName["empty-gen"].Generator, "ninja")
+		assertEqual(t, "make-preset.Generator", byName["make-preset"].Generator, "make")
+		assertEqual(t, "ninja-preset.Generator", byName["ninja-preset"].Generator, "ninja")
+	})
+
+	t.Run("include field triggers warning", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 4,
+			"include": ["other.json"],
+			"configurePresets": [
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/debug",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+
+		var buf bytes.Buffer
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+		origLogger := slog.Default()
+		slog.SetDefault(slog.New(handler))
+		defer slog.SetDefault(origLogger)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+
+		if len(result) != 1 {
+			t.Fatalf("got %d presets, want 1", len(result))
+		}
+
+		logOutput := buf.String()
+		if !strings.Contains(logOutput, "include") {
+			t.Errorf("expected warning about include field, got: %q", logOutput)
+		}
+	})
+
+	t.Run("preset with unresolvable binaryDir skipped with warning", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "bad-macro",
+					"binaryDir": "${sourceDir}/build/$env{HOME}",
+					"generator": "Ninja"
+				},
+				{
+					"name": "good",
+					"binaryDir": "${sourceDir}/build/good",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+
+		var buf bytes.Buffer
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+		origLogger := slog.Default()
+		slog.SetDefault(slog.New(handler))
+		defer slog.SetDefault(origLogger)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+
+		if len(result) != 1 {
+			t.Fatalf("got %d presets, want 1", len(result))
+		}
+		assertEqual(t, "result[0].Name", result[0].Name, "good")
+
+		logOutput := buf.String()
+		if !strings.Contains(logOutput, "bad-macro") {
+			t.Errorf("expected warning mentioning bad-macro preset, got: %q", logOutput)
+		}
+	})
+
+	t.Run("preset with empty binaryDir skipped with warning", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "no-bd",
+					"generator": "Ninja"
+				},
+				{
+					"name": "has-bd",
+					"binaryDir": "${sourceDir}/build/has",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+
+		var buf bytes.Buffer
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+		origLogger := slog.Default()
+		slog.SetDefault(slog.New(handler))
+		defer slog.SetDefault(origLogger)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+
+		if len(result) != 1 {
+			t.Fatalf("got %d presets, want 1", len(result))
+		}
+		assertEqual(t, "result[0].Name", result[0].Name, "has-bd")
+
+		logOutput := buf.String()
+		if !strings.Contains(logOutput, "no binaryDir") {
+			t.Errorf("expected warning about missing binaryDir, got: %q", logOutput)
+		}
+	})
+
+	t.Run("no CMakePresets.json returns nil", func(t *testing.T) {
+		dir := t.TempDir()
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+		if result != nil {
+			t.Errorf("expected nil result when no presets file, got: %+v", result)
+		}
+	})
+
+	t.Run("full happy path", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "base",
+					"binaryDir": "${sourceDir}/build/base",
+					"generator": "Ninja",
+					"hidden": true
+				},
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/debug",
+					"generator": "Ninja",
+					"inherits": "base"
+				},
+				{
+					"name": "release",
+					"binaryDir": "${sourceDir}/build/release",
+					"generator": "Unix Makefiles",
+					"inherits": "base"
+				}
+			]
+		}`)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+
+		if len(result) != 2 {
+			t.Fatalf("got %d presets, want 2", len(result))
+		}
+
+		// Results sorted by name: debug, release.
+		assertEqual(t, "result[0].Name", result[0].Name, "debug")
+		assertEqual(t, "result[0].BinaryDir", result[0].BinaryDir, filepath.Join(dir, "build/debug"))
+		assertEqual(t, "result[0].Generator", result[0].Generator, "ninja")
+
+		assertEqual(t, "result[1].Name", result[1].Name, "release")
+		assertEqual(t, "result[1].BinaryDir", result[1].BinaryDir, filepath.Join(dir, "build/release"))
+		assertEqual(t, "result[1].Generator", result[1].Generator, "make")
 	})
 }
