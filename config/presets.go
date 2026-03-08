@@ -263,7 +263,9 @@ func loadPresetsMetadata(dir string) ([]presetMetadata, error) {
 	}
 
 	// 6-8. Filter and build result.
-	var result []presetMetadata
+	// Use a non-nil empty slice to distinguish "file exists but all presets
+	// were filtered" from "no presets file" (which returns nil).
+	result := make([]presetMetadata, 0)
 	for _, p := range allPresets {
 		// 6. Remove hidden presets.
 		if p.Hidden {

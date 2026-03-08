@@ -865,6 +865,373 @@ func TestLoadMulti_EnvVarsAppliedInSingleConfigMode(t *testing.T) {
 	})
 }
 
+func TestLoadMulti_PresetDerived(t *testing.T) {
+	t.Run("CMakePresets.json only returns preset-derived configs", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/debug",
+					"generator": "Ninja"
+				},
+				{
+					"name": "release",
+					"binaryDir": "${sourceDir}/build/release",
+					"generator": "Unix Makefiles"
+				}
+			]
+		}`)
+
+		configs, defaultName, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		if len(configs) != 2 {
+			t.Fatalf("got %d configs, want 2", len(configs))
+		}
+
+		// Default should be alphabetically first preset name.
+		assertEqual(t, "defaultName", defaultName, "debug")
+
+		debug := configs["debug"]
+		assertEqual(t, "debug.BuildDir", debug.BuildDir, filepath.Join(dir, "build/debug"))
+		assertEqual(t, "debug.Generator", debug.Generator, "ninja")
+		assertEqual(t, "debug.Preset", debug.Preset, "debug")
+		// Other fields from defaults.
+		assertEqual(t, "debug.SourceDir", debug.SourceDir, ".")
+		assertEqual(t, "debug.Toolchain", debug.Toolchain, "auto")
+		assertDuration(t, "debug.BuildTimeout", debug.BuildTimeout, 5*time.Minute)
+		assertBool(t, "debug.InjectDiagnosticFlags", debug.InjectDiagnosticFlags, true)
+
+		release := configs["release"]
+		assertEqual(t, "release.BuildDir", release.BuildDir, filepath.Join(dir, "build/release"))
+		assertEqual(t, "release.Generator", release.Generator, "make")
+		assertEqual(t, "release.Preset", release.Preset, "release")
+	})
+
+	t.Run("CMakePresets.json with config file merges top-level fields", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/debug",
+					"generator": "Ninja"
+				},
+				{
+					"name": "release",
+					"binaryDir": "${sourceDir}/build/release",
+					"generator": "Unix Makefiles"
+				}
+			]
+		}`)
+		writeConfig(t, dir, `{
+			"build_timeout": "10m",
+			"toolchain": "clang",
+			"inject_diagnostic_flags": false
+		}`)
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		if len(configs) != 2 {
+			t.Fatalf("got %d configs, want 2", len(configs))
+		}
+
+		// Verify inherited top-level fields from .cpp-build-mcp.json.
+		debug := configs["debug"]
+		assertDuration(t, "debug.BuildTimeout", debug.BuildTimeout, 10*time.Minute)
+		assertEqual(t, "debug.Toolchain", debug.Toolchain, "clang")
+		assertBool(t, "debug.InjectDiagnosticFlags", debug.InjectDiagnosticFlags, false)
+
+		release := configs["release"]
+		assertDuration(t, "release.BuildTimeout", release.BuildTimeout, 10*time.Minute)
+		assertEqual(t, "release.Toolchain", release.Toolchain, "clang")
+		assertBool(t, "release.InjectDiagnosticFlags", release.InjectDiagnosticFlags, false)
+
+		// Preset-derived fields should still be correct.
+		assertEqual(t, "debug.BuildDir", debug.BuildDir, filepath.Join(dir, "build/debug"))
+		assertEqual(t, "debug.Generator", debug.Generator, "ninja")
+		assertEqual(t, "debug.Preset", debug.Preset, "debug")
+
+		assertEqual(t, "release.BuildDir", release.BuildDir, filepath.Join(dir, "build/release"))
+		assertEqual(t, "release.Generator", release.Generator, "make")
+		assertEqual(t, "release.Preset", release.Preset, "release")
+	})
+
+	t.Run("configs map suppresses preset discovery", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/debug",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+		writeConfig(t, dir, `{
+			"configs": {
+				"custom": {
+					"build_dir": "custom-build"
+				}
+			}
+		}`)
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		// Should use the explicit configs map, not presets.
+		if len(configs) != 1 {
+			t.Fatalf("got %d configs, want 1", len(configs))
+		}
+		if _, ok := configs["custom"]; !ok {
+			t.Fatal("expected 'custom' config from configs map, not preset-derived")
+		}
+		assertEqual(t, "custom.BuildDir", configs["custom"].BuildDir, "custom-build")
+	})
+
+	t.Run("all presets skipped falls back to single config with env vars", func(t *testing.T) {
+		dir := t.TempDir()
+		// All presets are hidden, so all will be filtered out.
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "base",
+					"binaryDir": "${sourceDir}/build/base",
+					"generator": "Ninja",
+					"hidden": true
+				}
+			]
+		}`)
+
+		t.Setenv("CPP_BUILD_MCP_BUILD_DIR", "env-build")
+
+		var buf bytes.Buffer
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+		origLogger := slog.Default()
+		slog.SetDefault(slog.New(handler))
+		defer slog.SetDefault(origLogger)
+
+		configs, defaultName, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		// Should fall back to single-config mode.
+		assertEqual(t, "defaultName", defaultName, "default")
+		if len(configs) != 1 {
+			t.Fatalf("got %d configs, want 1", len(configs))
+		}
+
+		cfg := configs["default"]
+		// Env vars should be applied in fallback single-config mode.
+		assertEqual(t, "BuildDir", cfg.BuildDir, "env-build")
+
+		// Verify warning was emitted.
+		logOutput := buf.String()
+		if !strings.Contains(logOutput, "no usable configure presets") {
+			t.Errorf("expected warning about no usable presets, got: %q", logOutput)
+		}
+	})
+
+	t.Run("default_config from config file applied to preset-derived mode", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "alpha",
+					"binaryDir": "${sourceDir}/build/alpha",
+					"generator": "Ninja"
+				},
+				{
+					"name": "beta",
+					"binaryDir": "${sourceDir}/build/beta",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+		writeConfig(t, dir, `{
+			"default_config": "beta"
+		}`)
+
+		_, defaultName, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		assertEqual(t, "defaultName", defaultName, "beta")
+	})
+
+	t.Run("top-level build_dir does NOT override preset-derived BuildDir", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/debug",
+					"generator": "Ninja"
+				},
+				{
+					"name": "release",
+					"binaryDir": "${sourceDir}/build/release",
+					"generator": "Unix Makefiles"
+				}
+			]
+		}`)
+		writeConfig(t, dir, `{
+			"build_dir": "should-be-ignored",
+			"generator": "make",
+			"preset": "should-be-ignored"
+		}`)
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		debug := configs["debug"]
+		// BuildDir from preset, not from .cpp-build-mcp.json top-level.
+		assertEqual(t, "debug.BuildDir", debug.BuildDir, filepath.Join(dir, "build/debug"))
+		// Generator from preset (Ninja -> ninja), not from .cpp-build-mcp.json.
+		assertEqual(t, "debug.Generator", debug.Generator, "ninja")
+		// Preset from preset name, not from .cpp-build-mcp.json.
+		assertEqual(t, "debug.Preset", debug.Preset, "debug")
+
+		release := configs["release"]
+		assertEqual(t, "release.BuildDir", release.BuildDir, filepath.Join(dir, "build/release"))
+		assertEqual(t, "release.Generator", release.Generator, "make")
+		assertEqual(t, "release.Preset", release.Preset, "release")
+	})
+
+	t.Run("env vars suppressed in multi-preset mode", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/debug",
+					"generator": "Ninja"
+				},
+				{
+					"name": "release",
+					"binaryDir": "${sourceDir}/build/release",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+
+		t.Setenv("CPP_BUILD_MCP_TOOLCHAIN", "clang")
+
+		var buf bytes.Buffer
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+		origLogger := slog.Default()
+		slog.SetDefault(slog.New(handler))
+		defer slog.SetDefault(origLogger)
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		// Env var should NOT be applied.
+		assertEqual(t, "debug.Toolchain", configs["debug"].Toolchain, "auto")
+		assertEqual(t, "release.Toolchain", configs["release"].Toolchain, "auto")
+
+		// Warning should be emitted.
+		logOutput := buf.String()
+		if !strings.Contains(logOutput, "environment variable overrides ignored in multi-config mode") {
+			t.Errorf("expected env var warning, got: %q", logOutput)
+		}
+	})
+
+	t.Run("env vars applied in single-preset mode", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "debug",
+					"binaryDir": "${sourceDir}/build/debug",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+
+		t.Setenv("CPP_BUILD_MCP_TOOLCHAIN", "clang")
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		// With single preset, env vars should apply.
+		assertEqual(t, "debug.Toolchain", configs["debug"].Toolchain, "clang")
+	})
+
+	t.Run("all presets skipped with config file falls back to single config", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "base",
+					"binaryDir": "${sourceDir}/build/base",
+					"generator": "Ninja",
+					"hidden": true
+				}
+			]
+		}`)
+		writeConfig(t, dir, `{
+			"build_dir": "custom-out",
+			"toolchain": "gcc"
+		}`)
+
+		t.Setenv("CPP_BUILD_MCP_BUILD_DIR", "env-build")
+
+		var buf bytes.Buffer
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+		origLogger := slog.Default()
+		slog.SetDefault(slog.New(handler))
+		defer slog.SetDefault(origLogger)
+
+		configs, defaultName, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		// Should fall back to single-config mode with .cpp-build-mcp.json fields.
+		assertEqual(t, "defaultName", defaultName, "default")
+		if len(configs) != 1 {
+			t.Fatalf("got %d configs, want 1", len(configs))
+		}
+
+		cfg := configs["default"]
+		// Env var overrides build_dir from config file.
+		assertEqual(t, "BuildDir", cfg.BuildDir, "env-build")
+		// Toolchain from config file.
+		assertEqual(t, "Toolchain", cfg.Toolchain, "gcc")
+
+		logOutput := buf.String()
+		if !strings.Contains(logOutput, "no usable configure presets") {
+			t.Errorf("expected warning about no usable presets, got: %q", logOutput)
+		}
+	})
+}
+
 // writeConfig writes JSON content to .cpp-build-mcp.json in dir.
 func writeConfig(t *testing.T, dir, content string) {
 	t.Helper()

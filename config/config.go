@@ -112,19 +112,37 @@ func Load(dir string) (*Config, error) {
 // (build_dir, cmake_args, etc.) replace top-level values rather than
 // appending to them.
 //
-// If the config file does not contain a "configs" map, a single config named
-// "default" is returned with default name "default".
+// If a CMakePresets.json file exists and the config file does not contain a
+// "configs" map, preset-derived configurations are created automatically.
+// Each non-hidden, single-config-generator preset becomes a named config
+// with its BuildDir, Generator, and Preset fields set from the preset
+// metadata. If a .cpp-build-mcp.json exists (without "configs"), its
+// top-level fields are merged onto each preset-derived config, but
+// BuildDir, Generator, and Preset from preset metadata are restored after
+// the merge to prevent overrides.
+//
+// If the config file does not contain a "configs" map and no presets are
+// found, a single config named "default" is returned with default name
+// "default".
 //
 // Environment variable overrides are applied only in single-config mode
-// (no "configs" map). In multi-config mode, env vars are intentionally
-// ignored to preserve build_dir uniqueness, and a warning is logged if
-// any are set.
+// (no "configs" map, no presets or exactly 1 preset). In multi-config and
+// multi-preset mode, env vars are intentionally ignored to preserve
+// build_dir uniqueness, and a warning is logged if any are set.
 func LoadMulti(dir string) (map[string]*Config, string, error) {
 	path := filepath.Join(dir, configFileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			slog.Debug("no config file found, using defaults", "path", path)
+
+			// Check for CMakePresets.json even without a config file.
+			if configs, defaultName, ok, err := buildPresetConfigs(dir, nil, "", ""); err != nil {
+				return nil, "", err
+			} else if ok {
+				return configs, defaultName, nil
+			}
+
 			cfg := defaults()
 			applyEnv(&cfg)
 			return map[string]*Config{"default": &cfg}, "default", nil
@@ -138,8 +156,14 @@ func LoadMulti(dir string) (map[string]*Config, string, error) {
 		return nil, "", fmt.Errorf("parsing config file %s: invalid JSON: %w", path, err)
 	}
 
-	// Single-config mode: no "configs" map present.
+	// No "configs" map: check for preset-derived configs before single-config fallback.
 	if file.Configs == nil {
+		if configs, defaultName, ok, err := buildPresetConfigs(dir, data, file.DefaultConfig, path); err != nil {
+			return nil, "", err
+		} else if ok {
+			return configs, defaultName, nil
+		}
+
 		cfg := defaults()
 		if err := applyJSON(&cfg, data); err != nil {
 			return nil, "", fmt.Errorf("parsing config file %s: %w", path, err)
@@ -206,6 +230,81 @@ func LoadMulti(dir string) (map[string]*Config, string, error) {
 
 	slog.Debug("loaded multi-config file", "path", path, "configs", len(configs), "default", defaultName)
 	return configs, defaultName, nil
+}
+
+// buildPresetConfigs attempts to build configs from CMakePresets.json in dir.
+// If presets are found and usable, it returns the configs map, default name,
+// and ok=true. If no presets are found or all are filtered out, it returns
+// ok=false and the caller should fall through to single-config mode.
+//
+// data is the raw .cpp-build-mcp.json content (nil if no config file exists).
+// defaultConfig is the default_config value from .cpp-build-mcp.json (empty if unset).
+// path is the config file path for error messages (empty if no config file).
+func buildPresetConfigs(dir string, data []byte, defaultConfig string, path string) (map[string]*Config, string, bool, error) {
+	presets, err := loadPresetsMetadata(dir)
+	if err != nil {
+		return nil, "", false, err
+	}
+	if presets == nil {
+		// No CMakePresets.json found.
+		return nil, "", false, nil
+	}
+
+	if len(presets) == 0 {
+		// CMakePresets.json exists but all presets were filtered/skipped.
+		slog.Warn("CMakePresets.json found but no usable configure presets")
+		return nil, "", false, nil
+	}
+
+	// Build per-preset Config entries.
+	configs := make(map[string]*Config, len(presets))
+	for _, pm := range presets {
+		cfg := defaults()
+		cfg.BuildDir = pm.BinaryDir
+		cfg.Generator = pm.Generator
+		cfg.Preset = pm.Name
+		configs[pm.Name] = &cfg
+	}
+
+	// If .cpp-build-mcp.json exists (without configs map), merge its top-level
+	// fields onto each preset-derived config.
+	if data != nil {
+		for _, pm := range presets {
+			cfg := configs[pm.Name]
+			if err := applyJSON(cfg, data); err != nil {
+				return nil, "", false, fmt.Errorf("parsing config file %s: %w", path, err)
+			}
+			// Restore preset-derived fields that may have been overridden by
+			// top-level build_dir, generator, or preset in .cpp-build-mcp.json.
+			cfg.BuildDir = pm.BinaryDir
+			cfg.Generator = pm.Generator
+			cfg.Preset = pm.Name
+		}
+	}
+
+	// Apply env vars or suppress them based on preset count.
+	if len(presets) >= 2 {
+		warnEnvVarsIgnored()
+	} else {
+		// Single preset: env vars apply (same as single-config semantics).
+		for _, cfg := range configs {
+			applyEnv(cfg)
+		}
+	}
+
+	// Determine default config name.
+	defaultName := defaultConfig
+	if defaultName != "" {
+		if _, ok := configs[defaultName]; !ok {
+			return nil, "", false, fmt.Errorf("default_config %q not found in preset-derived configs", defaultName)
+		}
+	} else {
+		// Presets are already sorted by name; first entry is alphabetically first.
+		defaultName = presets[0].Name
+	}
+
+	slog.Debug("loaded preset-derived configs", "dir", dir, "configs", len(configs), "default", defaultName)
+	return configs, defaultName, true, nil
 }
 
 // applyJSON unmarshals raw JSON data onto cfg, overriding only the fields
