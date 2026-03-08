@@ -1,7 +1,7 @@
 ---
 title: "CMake Presets Integration"
 type: plan
-status: active
+status: complete
 created: 2026-03-08
 updated: 2026-03-08
 tags: [go, cmake, presets, zero-config, auto-discovery]
@@ -18,7 +18,7 @@ phases:
     depends_on: [1]
   - id: 3
     title: "Polish and Edge Cases"
-    status: planned
+    status: complete
     doc: "03-Polish-And-Edge-Cases.md"
     depends_on: [2]
 ---
