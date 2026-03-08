@@ -197,6 +197,48 @@ func TestLoad(t *testing.T) {
 		}
 	})
 
+	t.Run("preset field parsed from JSON", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"preset": "debug"
+		}`)
+
+		cfg, err := Load(dir)
+		if err != nil {
+			t.Fatalf("Load() returned error: %v", err)
+		}
+
+		assertEqual(t, "Preset", cfg.Preset, "debug")
+		// Other fields should keep defaults.
+		assertEqual(t, "BuildDir", cfg.BuildDir, "build")
+		assertEqual(t, "Generator", cfg.Generator, "ninja")
+	})
+
+	t.Run("preset defaults to empty string when not specified", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"build_dir": "out"
+		}`)
+
+		cfg, err := Load(dir)
+		if err != nil {
+			t.Fatalf("Load() returned error: %v", err)
+		}
+
+		assertEqual(t, "Preset", cfg.Preset, "")
+	})
+
+	t.Run("preset defaults to empty string with no config file", func(t *testing.T) {
+		dir := t.TempDir()
+
+		cfg, err := Load(dir)
+		if err != nil {
+			t.Fatalf("Load() returned error: %v", err)
+		}
+
+		assertEqual(t, "Preset", cfg.Preset, "")
+	})
+
 	t.Run("invalid BuildTimeout in env var is ignored", func(t *testing.T) {
 		dir := t.TempDir()
 		writeConfig(t, dir, `{"build_timeout": "3m"}`)
@@ -522,6 +564,50 @@ func TestLoadMulti(t *testing.T) {
 
 		// Env vars should NOT be applied in multi-config mode.
 		assertEqual(t, "BuildDir", configs["dev"].BuildDir, "dev-build")
+	})
+
+	t.Run("preset field in multi-config entries", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"preset": "base-preset",
+			"configs": {
+				"debug": {
+					"build_dir": "build/debug",
+					"preset": "debug-preset"
+				},
+				"release": {
+					"build_dir": "build/release"
+				}
+			},
+			"default_config": "debug"
+		}`)
+
+		configs, defaultName, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		assertEqual(t, "defaultName", defaultName, "debug")
+
+		// debug overrides preset from per-config.
+		assertEqual(t, "debug.Preset", configs["debug"].Preset, "debug-preset")
+		// release inherits preset from top-level.
+		assertEqual(t, "release.Preset", configs["release"].Preset, "base-preset")
+	})
+
+	t.Run("preset in single-config via LoadMulti", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"preset": "my-preset",
+			"build_dir": "out"
+		}`)
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		assertEqual(t, "Preset", configs["default"].Preset, "my-preset")
 	})
 
 	t.Run("top-level cmake_args inherited when per-config omits them", func(t *testing.T) {

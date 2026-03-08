@@ -20,6 +20,7 @@ type Config struct {
 	SourceDir             string        `json:"source_dir"`
 	Toolchain             string        `json:"toolchain"`              // "auto", "clang", "gcc", "msvc"
 	Generator             string        `json:"generator"`              // "ninja", "make"
+	Preset                string        `json:"preset"`                 // CMake preset name (empty = no preset)
 	CMakeArgs             []string      `json:"cmake_args"`
 	// BuildTimeout is stored as time.Duration internally. Note: marshaling Config
 	// directly to JSON produces nanosecond integers, not duration strings. The
@@ -51,6 +52,7 @@ type configJSON struct {
 	SourceDir             *string  `json:"source_dir"`
 	Toolchain             *string  `json:"toolchain"`
 	Generator             *string  `json:"generator"`
+	Preset                *string  `json:"preset"`
 	CMakeArgs             []string `json:"cmake_args"`
 	BuildTimeout          *string  `json:"build_timeout"`
 	InjectDiagnosticFlags *bool    `json:"inject_diagnostic_flags"`
@@ -225,6 +227,9 @@ func applyJSON(cfg *Config, data []byte) error {
 	}
 	if raw.Generator != nil {
 		cfg.Generator = *raw.Generator
+	}
+	if raw.Preset != nil {
+		cfg.Preset = *raw.Preset
 	}
 	if raw.CMakeArgs != nil {
 		cp := make([]string, len(raw.CMakeArgs))

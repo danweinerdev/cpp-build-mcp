@@ -54,6 +54,23 @@ func (b *CMakeBuilder) Clean(ctx context.Context, targets []string) (*BuildResul
 	return b.run(ctx, "cmake", args)
 }
 
+// generatorCMakeName maps a normalized generator name (as stored in
+// Config.Generator) to the full name that cmake's -G flag expects.
+//   - "ninja" -> "Ninja"
+//   - "make"  -> "Unix Makefiles"
+//   - ""      -> "Ninja" (default)
+//   - unknown -> passed through as-is (let cmake decide)
+func generatorCMakeName(gen string) string {
+	switch gen {
+	case "ninja", "":
+		return "Ninja"
+	case "make":
+		return "Unix Makefiles"
+	default:
+		return gen
+	}
+}
+
 // buildConfigureArgs constructs the argument list for a cmake configure
 // invocation. This method is exported-via-test (lowercase) so unit tests can
 // verify argument construction without invoking cmake.
@@ -61,7 +78,7 @@ func (b *CMakeBuilder) buildConfigureArgs(extraArgs []string) []string {
 	args := []string{
 		"-S", b.cfg.SourceDir,
 		"-B", b.cfg.BuildDir,
-		"-G", "Ninja",
+		"-G", generatorCMakeName(b.cfg.Generator),
 		"-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
 	}
 

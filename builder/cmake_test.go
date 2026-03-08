@@ -67,6 +67,7 @@ func TestBuildConfigureArgs(t *testing.T) {
 		cfg := &config.Config{
 			SourceDir:             "src",
 			BuildDir:              "build",
+			Generator:             "ninja",
 			Toolchain:             "auto",
 			InjectDiagnosticFlags: true,
 		}
@@ -81,6 +82,32 @@ func TestBuildConfigureArgs(t *testing.T) {
 		// auto toolchain should NOT inject diagnostic flags
 		assertNotContains(t, args, "-DCMAKE_C_FLAGS=-fdiagnostics-format=json")
 		assertNotContains(t, args, "-DCMAKE_CXX_FLAGS=-fdiagnostics-format=json")
+	})
+
+	t.Run("make generator produces Unix Makefiles", func(t *testing.T) {
+		cfg := &config.Config{
+			SourceDir: "src",
+			BuildDir:  "build",
+			Generator: "make",
+			Toolchain: "auto",
+		}
+		b := NewCMakeBuilder(cfg)
+		args := b.buildConfigureArgs(nil)
+
+		assertContainsSequence(t, args, "-G", "Unix Makefiles")
+	})
+
+	t.Run("empty generator defaults to Ninja", func(t *testing.T) {
+		cfg := &config.Config{
+			SourceDir: "src",
+			BuildDir:  "build",
+			Generator: "",
+			Toolchain: "auto",
+		}
+		b := NewCMakeBuilder(cfg)
+		args := b.buildConfigureArgs(nil)
+
+		assertContainsSequence(t, args, "-G", "Ninja")
 	})
 
 	t.Run("clang toolchain injects diagnostic flags", func(t *testing.T) {
