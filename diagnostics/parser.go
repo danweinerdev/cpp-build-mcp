@@ -3,13 +3,16 @@ package diagnostics
 import "strings"
 
 // NewParser returns a DiagnosticParser for the given toolchain name.
-// Supported toolchains: "clang" (JSON parser), "gcc" (regex parser for
-// legacy output), and everything else (regex fallback for MSVC and others).
+// Supported toolchains: "clang" (Clang JSON parser), "gcc" (GCC JSON
+// parser for GCC 10+), "gcc-legacy" (regex for GCC < 10), "msvc" (regex),
+// and everything else (regex fallback).
 func NewParser(toolchain string) DiagnosticParser {
 	switch strings.ToLower(toolchain) {
 	case "clang":
 		return &ClangParser{}
 	case "gcc":
+		return &GCCParser{}
+	case "gcc-legacy", "msvc", "":
 		return &RegexParser{}
 	default:
 		return &RegexParser{}

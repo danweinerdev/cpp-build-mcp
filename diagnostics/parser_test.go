@@ -10,7 +10,8 @@ func TestNewParser(t *testing.T) {
 	}{
 		{"clang", "clang", "*diagnostics.ClangParser"},
 		{"clang_uppercase", "Clang", "*diagnostics.ClangParser"},
-		{"gcc", "gcc", "*diagnostics.RegexParser"},
+		{"gcc", "gcc", "*diagnostics.GCCParser"},
+		{"gcc_legacy", "gcc-legacy", "*diagnostics.RegexParser"},
 		{"msvc", "msvc", "*diagnostics.RegexParser"},
 		{"empty", "", "*diagnostics.RegexParser"},
 		{"unknown", "icc", "*diagnostics.RegexParser"},
@@ -31,6 +32,8 @@ func typeString(p DiagnosticParser) string {
 	switch p.(type) {
 	case *ClangParser:
 		return "*diagnostics.ClangParser"
+	case *GCCParser:
+		return "*diagnostics.GCCParser"
 	case *RegexParser:
 		return "*diagnostics.RegexParser"
 	default:
@@ -52,13 +55,26 @@ func TestParse(t *testing.T) {
 		t.Errorf("Source = %q, want %q", diags[0].Source, "clang")
 	}
 
-	// GCC routing: regex parser extracts diagnostic
-	diags, err = Parse("gcc", "", "foo.cpp:1:1: error: bad")
+	// GCC routing: GCC JSON parser reads from stdout
+	gccJSON := `[{"kind":"error","message":"bad","locations":[{"caret":{"file":"foo.cpp","line":1,"column":1}}],"children":[]}]`
+	diags, err = Parse("gcc", gccJSON, "")
 	if err != nil {
 		t.Fatalf("Parse(gcc) error: %v", err)
 	}
 	if len(diags) != 1 {
 		t.Fatalf("Parse(gcc) got %d diagnostics, want 1", len(diags))
+	}
+	if diags[0].Source != "gcc" {
+		t.Errorf("Source = %q, want %q", diags[0].Source, "gcc")
+	}
+
+	// GCC-legacy routing: regex parser extracts from stderr
+	diags, err = Parse("gcc-legacy", "", "foo.cpp:1:1: error: bad")
+	if err != nil {
+		t.Fatalf("Parse(gcc-legacy) error: %v", err)
+	}
+	if len(diags) != 1 {
+		t.Fatalf("Parse(gcc-legacy) got %d diagnostics, want 1", len(diags))
 	}
 	if diags[0].Source != "compiler" {
 		t.Errorf("Source = %q, want %q", diags[0].Source, "compiler")
