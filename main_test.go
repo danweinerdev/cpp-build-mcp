@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1040,6 +1043,259 @@ func TestParseCMakeMessagesWithErrors(t *testing.T) {
 	}
 	if len(messages) != 3 {
 		t.Fatalf("expected 3 messages, got %d", len(messages))
+	}
+}
+
+// --- suggest_fix tests ---
+
+func TestSuggestFixValidIndex(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv := newTestServer(fb)
+	srv.store.SetConfigured()
+
+	// Create a temp source file with 25 lines.
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "test.cpp")
+	var lines []string
+	for i := 1; i <= 25; i++ {
+		lines = append(lines, fmt.Sprintf("// line %d", i))
+	}
+	if err := os.WriteFile(srcFile, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	// Populate store with an error pointing to the file, line 15.
+	if err := srv.store.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	errs := []diagnostics.Diagnostic{
+		{File: srcFile, Line: 15, Column: 3, Severity: diagnostics.SeverityError, Message: "undeclared identifier"},
+	}
+	srv.store.FinishBuild(1, time.Second, errs, nil)
+
+	req := makeCallToolRequest(map[string]interface{}{"error_index": float64(0)})
+	result, err := srv.handleSuggestFix(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp suggestFixResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.File != srcFile {
+		t.Fatalf("expected file %s, got %s", srcFile, resp.File)
+	}
+	if resp.StartLine != 5 {
+		t.Fatalf("expected start_line 5, got %d", resp.StartLine)
+	}
+	if resp.EndLine != 25 {
+		t.Fatalf("expected end_line 25, got %d", resp.EndLine)
+	}
+	if resp.Diagnostic.Line != 15 {
+		t.Fatalf("expected diagnostic line 15, got %d", resp.Diagnostic.Line)
+	}
+	if resp.Diagnostic.Message != "undeclared identifier" {
+		t.Fatalf("expected diagnostic message 'undeclared identifier', got %s", resp.Diagnostic.Message)
+	}
+	// Source should contain line 15.
+	if !strings.Contains(resp.Source, "// line 15") {
+		t.Fatalf("expected source to contain '// line 15', got %q", resp.Source)
+	}
+}
+
+func TestSuggestFixOutOfBounds(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv := newTestServer(fb)
+	srv.store.SetConfigured()
+
+	// Populate store with 1 error.
+	if err := srv.store.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	errs := []diagnostics.Diagnostic{
+		{File: "main.cpp", Line: 10, Severity: diagnostics.SeverityError, Message: "error"},
+	}
+	srv.store.FinishBuild(1, time.Second, errs, nil)
+
+	req := makeCallToolRequest(map[string]interface{}{"error_index": float64(5)})
+	result, err := srv.handleSuggestFix(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected tool error for out of bounds index")
+	}
+	text := extractText(t, result)
+	if !strings.Contains(text, "out of range") {
+		t.Fatalf("expected 'out of range' in error message, got %q", text)
+	}
+}
+
+func TestSuggestFixFileNotFound(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv := newTestServer(fb)
+	srv.store.SetConfigured()
+
+	// Populate store with an error pointing to a nonexistent file.
+	if err := srv.store.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	errs := []diagnostics.Diagnostic{
+		{File: "/nonexistent/path/to/file.cpp", Line: 10, Severity: diagnostics.SeverityError, Message: "error"},
+	}
+	srv.store.FinishBuild(1, time.Second, errs, nil)
+
+	req := makeCallToolRequest(map[string]interface{}{"error_index": float64(0)})
+	result, err := srv.handleSuggestFix(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected tool error for file not found")
+	}
+	text := extractText(t, result)
+	if !strings.Contains(text, "cannot read source file") {
+		t.Fatalf("expected 'cannot read source file' in error message, got %q", text)
+	}
+}
+
+func TestSuggestFixNearStartOfFile(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv := newTestServer(fb)
+	srv.store.SetConfigured()
+
+	// Create a temp source file with 25 lines.
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "start.cpp")
+	var lines []string
+	for i := 1; i <= 25; i++ {
+		lines = append(lines, fmt.Sprintf("// line %d", i))
+	}
+	if err := os.WriteFile(srcFile, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	// Error on line 2 — start_line should clamp to 1.
+	if err := srv.store.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	errs := []diagnostics.Diagnostic{
+		{File: srcFile, Line: 2, Severity: diagnostics.SeverityError, Message: "error near start"},
+	}
+	srv.store.FinishBuild(1, time.Second, errs, nil)
+
+	req := makeCallToolRequest(map[string]interface{}{"error_index": float64(0)})
+	result, err := srv.handleSuggestFix(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp suggestFixResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.StartLine != 1 {
+		t.Fatalf("expected start_line to clamp to 1, got %d", resp.StartLine)
+	}
+	if resp.EndLine != 12 {
+		t.Fatalf("expected end_line 12, got %d", resp.EndLine)
+	}
+}
+
+func TestSuggestFixNearEndOfFile(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv := newTestServer(fb)
+	srv.store.SetConfigured()
+
+	// Create a temp source file with 15 lines.
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "end.cpp")
+	var lines []string
+	for i := 1; i <= 15; i++ {
+		lines = append(lines, fmt.Sprintf("// line %d", i))
+	}
+	if err := os.WriteFile(srcFile, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	// Error on last line (15) — end_line should clamp to 15.
+	if err := srv.store.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	errs := []diagnostics.Diagnostic{
+		{File: srcFile, Line: 15, Severity: diagnostics.SeverityError, Message: "error near end"},
+	}
+	srv.store.FinishBuild(1, time.Second, errs, nil)
+
+	req := makeCallToolRequest(map[string]interface{}{"error_index": float64(0)})
+	result, err := srv.handleSuggestFix(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp suggestFixResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.StartLine != 5 {
+		t.Fatalf("expected start_line 5, got %d", resp.StartLine)
+	}
+	if resp.EndLine != 15 {
+		t.Fatalf("expected end_line to clamp to 15, got %d", resp.EndLine)
+	}
+	// Source should contain the last line.
+	if !strings.Contains(resp.Source, "// line 15") {
+		t.Fatalf("expected source to contain '// line 15', got %q", resp.Source)
+	}
+}
+
+// --- parseFilesCompiled tests ---
+
+func TestParseFilesCompiledNinja(t *testing.T) {
+	stderr := "[1/5] Building CXX object main.cpp.o\n[2/5] Building CXX object util.cpp.o\n[3/5] Building CXX object lib.cpp.o\n[4/5] Linking CXX executable app\n[5/5] Finished\n"
+	got := parseFilesCompiled(stderr)
+	if got != 5 {
+		t.Fatalf("expected 5 files compiled, got %d", got)
+	}
+}
+
+func TestParseFilesCompiledEmpty(t *testing.T) {
+	got := parseFilesCompiled("")
+	if got != 0 {
+		t.Fatalf("expected 0 files compiled, got %d", got)
+	}
+}
+
+func TestParseFilesCompiledMake(t *testing.T) {
+	stderr := "gcc -c -o main.o main.cpp\ng++ -c -o util.o util.cpp\nclang -c -o lib.o lib.cpp\nlinking app\n"
+	got := parseFilesCompiled(stderr)
+	if got != 3 {
+		t.Fatalf("expected 3 files compiled, got %d", got)
+	}
+}
+
+func TestParseFilesCompiledNinjaCacheHit(t *testing.T) {
+	// All targets cached — no progress lines.
+	stderr := "ninja: no work to do.\n"
+	got := parseFilesCompiled(stderr)
+	if got != 0 {
+		t.Fatalf("expected 0 files compiled for cache hit, got %d", got)
 	}
 }
 

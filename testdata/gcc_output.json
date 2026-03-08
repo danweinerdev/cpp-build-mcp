@@ -1,0 +1,32 @@
+[
+  {
+    "kind": "error",
+    "message": "use of undeclared identifier 'undeclared_variable'",
+    "option": "-Werror",
+    "locations": [
+      {
+        "caret": {
+          "file": "main.cpp",
+          "line": 3,
+          "column": 18
+        }
+      }
+    ],
+    "children": [
+      {
+        "kind": "note",
+        "message": "did you mean 'declared_variable'?",
+        "locations": [
+          {
+            "caret": {
+              "file": "main.cpp",
+              "line": 2,
+              "column": 5
+            }
+          }
+        ],
+        "children": []
+      }
+    ]
+  }
+]

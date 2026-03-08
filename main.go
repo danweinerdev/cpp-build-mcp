@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"log/slog"
+	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -103,6 +107,14 @@ func main() {
 		srv.handleGetBuildGraph,
 	)
 
+	s.AddTool(
+		mcp.NewTool("suggest_fix",
+			mcp.WithDescription("Get source context around a build error for fixing."),
+			mcp.WithNumber("error_index", mcp.Description("Zero-based index into the error list from get_errors.")),
+		),
+		srv.handleSuggestFix,
+	)
+
 	s.AddResource(
 		mcp.NewResource("build://health", "Build Health",
 			mcp.WithResourceDescription("One-line summary of build system state"),
@@ -158,6 +170,15 @@ type changedFilesResponse struct {
 
 // buildGraphResponse is the JSON structure returned by the get_build_graph tool.
 // It directly uses graph.GraphSummary for marshaling.
+
+// suggestFixResponse is the JSON structure returned by the suggest_fix tool.
+type suggestFixResponse struct {
+	File       string          `json:"file"`
+	StartLine  int             `json:"start_line"`
+	EndLine    int             `json:"end_line"`
+	Source     string          `json:"source"`
+	Diagnostic diagnosticEntry `json:"diagnostic"`
+}
 
 // diagnosticEntry represents a single diagnostic in the get_errors response.
 // Fields with omitempty are excluded when empty, matching the Diagnostic struct
@@ -242,11 +263,16 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 		}
 	}
 
+	// If the build was killed (timeout/cancel), mark state as dirty.
+	if result.Killed {
+		srv.store.SetDirty()
+	}
+
 	// Update state with build results.
 	srv.store.FinishBuild(result.ExitCode, result.Duration, errs, warns)
 
-	// Clear dirty if the build succeeded and was dirty.
-	if wasDirty && result.ExitCode == 0 {
+	// Clear dirty if the build succeeded, was dirty before, and was not killed.
+	if wasDirty && result.ExitCode == 0 && !result.Killed {
 		srv.store.ClearDirty()
 	}
 
@@ -256,7 +282,7 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 		ErrorCount:    len(errs),
 		WarningCount:  len(warns),
 		DurationMs:    result.Duration.Milliseconds(),
-		FilesCompiled: 0,
+		FilesCompiled: parseFilesCompiled(result.Stderr),
 	}
 
 	data, err := json.Marshal(resp)
@@ -504,4 +530,92 @@ func (srv *mcpServer) handleGetBuildGraph(_ context.Context, _ mcp.CallToolReque
 	}
 
 	return mcp.NewToolResultText(string(data)), nil
+}
+
+func (srv *mcpServer) handleSuggestFix(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	idx := req.GetInt("error_index", -1)
+	if idx < 0 {
+		return mcp.NewToolResultError("error_index is required and must be >= 0"), nil
+	}
+
+	errs := srv.store.Errors()
+	if idx >= len(errs) {
+		return mcp.NewToolResultError(fmt.Sprintf("error_index %d out of range (have %d errors)", idx, len(errs))), nil
+	}
+
+	diag := errs[idx]
+
+	content, err := os.ReadFile(diag.File)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("cannot read source file %q: %s", diag.File, err.Error())), nil
+	}
+
+	lines := strings.Split(string(content), "\n")
+	totalLines := len(lines)
+
+	// Diagnostic lines are 1-based. Compute the context window [startLine, endLine] (1-based, inclusive).
+	startLine := diag.Line - 10
+	if startLine < 1 {
+		startLine = 1
+	}
+	endLine := diag.Line + 10
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+
+	// Extract the snippet (convert to 0-based indexing for slicing).
+	snippet := strings.Join(lines[startLine-1:endLine], "\n")
+
+	resp := suggestFixResponse{
+		File:      diag.File,
+		StartLine: startLine,
+		EndLine:   endLine,
+		Source:    snippet,
+		Diagnostic: diagnosticEntry{
+			File:     diag.File,
+			Line:     diag.Line,
+			Column:   diag.Column,
+			Severity: string(diag.Severity),
+			Message:  diag.Message,
+			Code:     diag.Code,
+		},
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return mcp.NewToolResultError("failed to marshal response: " + err.Error()), nil
+	}
+
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+// parseFilesCompiled extracts the number of files compiled from build output.
+// For Ninja builds, it parses [N/M] progress lines and returns the highest N.
+// For Make builds (when no Ninja progress is found), it counts lines that look
+// like compiler invocations.
+func parseFilesCompiled(stderr string) int {
+	// Look for Ninja progress pattern [N/M] at start of line.
+	ninjaRe := regexp.MustCompile(`^\[(\d+)/\d+\]`)
+	highest := 0
+	for _, line := range strings.Split(stderr, "\n") {
+		if m := ninjaRe.FindStringSubmatch(line); m != nil {
+			n, _ := strconv.Atoi(m[1])
+			if n > highest {
+				highest = n
+			}
+		}
+	}
+	if highest > 0 {
+		return highest
+	}
+
+	// Fallback for Make: count compiler invocation lines.
+	compilerRe := regexp.MustCompile(`^\s*(gcc|g\+\+|clang|clang\+\+|cl\.exe|cc|c\+\+)\s`)
+	count := 0
+	for _, line := range strings.Split(stderr, "\n") {
+		if compilerRe.MatchString(line) {
+			count++
+		}
+	}
+	return count
 }

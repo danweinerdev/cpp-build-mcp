@@ -127,6 +127,14 @@ func startE2E(t *testing.T, fb *fakeBuilder) *e2eEnv {
 		srv.handleGetBuildGraph,
 	)
 
+	s.AddTool(
+		mcp.NewTool("suggest_fix",
+			mcp.WithDescription("Get source context around a build error for fixing."),
+			mcp.WithNumber("error_index", mcp.Description("Zero-based index into the error list from get_errors.")),
+		),
+		srv.handleSuggestFix,
+	)
+
 	s.AddResource(
 		mcp.NewResource("build://health", "Build Health",
 			mcp.WithResourceDescription("Build health summary"),

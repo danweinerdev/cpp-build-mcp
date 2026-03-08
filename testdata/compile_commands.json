@@ -1,0 +1,17 @@
+[
+  {
+    "directory": "/tmp/build",
+    "command": "clang++ -std=c++17 -I/usr/include -o main.cpp.o -c /src/main.cpp",
+    "file": "/src/main.cpp"
+  },
+  {
+    "directory": "/tmp/build",
+    "command": "clang++ -std=c++17 -I/usr/include -I/src/include -o util.cpp.o -c /src/util.cpp",
+    "file": "/src/util.cpp"
+  },
+  {
+    "directory": "/tmp/build",
+    "command": "clang++ -std=c++17 -I/usr/include -o lib.cpp.o -c /src/lib/lib.cpp",
+    "file": "/src/lib/lib.cpp"
+  }
+]

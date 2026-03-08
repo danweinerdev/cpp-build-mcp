@@ -1,0 +1,10 @@
+[
+  {
+    "file": "main.cpp",
+    "line": 3,
+    "column": 18,
+    "severity": "error",
+    "message": "use of undeclared identifier 'undeclared_variable'",
+    "option": "-Werror"
+  }
+]
