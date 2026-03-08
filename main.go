@@ -171,26 +171,30 @@ type listConfigsResponse struct {
 
 // buildResponse is the JSON structure returned by the build tool.
 type buildResponse struct {
-	ExitCode      int   `json:"exit_code"`
-	ErrorCount    int   `json:"error_count"`
-	WarningCount  int   `json:"warning_count"`
-	DurationMs    int64 `json:"duration_ms"`
-	FilesCompiled int   `json:"files_compiled"`
+	Config        string `json:"config"`
+	ExitCode      int    `json:"exit_code"`
+	ErrorCount    int    `json:"error_count"`
+	WarningCount  int    `json:"warning_count"`
+	DurationMs    int64  `json:"duration_ms"`
+	FilesCompiled int    `json:"files_compiled"`
 }
 
 // getErrorsResponse is the JSON structure returned by the get_errors tool.
 type getErrorsResponse struct {
+	Config string            `json:"config"`
 	Errors []diagnosticEntry `json:"errors"`
 }
 
 // getWarningsResponse is the JSON structure returned by the get_warnings tool.
 type getWarningsResponse struct {
+	Config   string            `json:"config"`
 	Warnings []diagnosticEntry `json:"warnings"`
 	Count    int               `json:"count"`
 }
 
 // configureResponse is the JSON structure returned by the configure tool.
 type configureResponse struct {
+	Config     string   `json:"config"`
 	Success    bool     `json:"success"`
 	ErrorCount int      `json:"error_count"`
 	Messages   []string `json:"messages"`
@@ -198,22 +202,30 @@ type configureResponse struct {
 
 // cleanResponse is the JSON structure returned by the clean tool.
 type cleanResponse struct {
+	Config  string `json:"config"`
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 }
 
 // changedFilesResponse is the JSON structure returned by the get_changed_files tool.
 type changedFilesResponse struct {
+	Config string   `json:"config"`
 	Files  []string `json:"files"`
 	Count  int      `json:"count"`
 	Method string   `json:"method"`
 }
 
 // buildGraphResponse is the JSON structure returned by the get_build_graph tool.
-// It directly uses graph.GraphSummary for marshaling.
+// It wraps graph.GraphSummary so the config name can be included without
+// modifying the graph package.
+type buildGraphResponse struct {
+	Config string `json:"config"`
+	*graph.GraphSummary
+}
 
 // suggestFixResponse is the JSON structure returned by the suggest_fix tool.
 type suggestFixResponse struct {
+	Config     string          `json:"config"`
 	File       string          `json:"file"`
 	StartLine  int             `json:"start_line"`
 	EndLine    int             `json:"end_line"`
@@ -336,6 +348,7 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 
 	// Build the response.
 	resp := buildResponse{
+		Config:        inst.name,
 		ExitCode:      result.ExitCode,
 		ErrorCount:    len(errs),
 		WarningCount:  len(warns),
@@ -376,7 +389,7 @@ func (srv *mcpServer) handleGetErrors(_ context.Context, req mcp.CallToolRequest
 		}
 	}
 
-	resp := getErrorsResponse{Errors: entries}
+	resp := getErrorsResponse{Config: inst.name, Errors: entries}
 
 	data, err := json.Marshal(resp)
 	if err != nil {
@@ -449,6 +462,7 @@ func (srv *mcpServer) handleGetWarnings(_ context.Context, req mcp.CallToolReque
 	}
 
 	resp := getWarningsResponse{
+		Config:   inst.name,
 		Warnings: entries,
 		Count:    len(entries),
 	}
@@ -494,6 +508,7 @@ func (srv *mcpServer) handleConfigure(ctx context.Context, req mcp.CallToolReque
 	}
 
 	resp := configureResponse{
+		Config:     inst.name,
 		Success:    success,
 		ErrorCount: errorCount,
 		Messages:   messages,
@@ -576,6 +591,7 @@ func (srv *mcpServer) handleClean(ctx context.Context, req mcp.CallToolRequest) 
 	inst.store.SetClean()
 
 	resp := cleanResponse{
+		Config:  inst.name,
 		Success: true,
 		Message: "Clean complete",
 	}
@@ -606,6 +622,7 @@ func (srv *mcpServer) handleGetChangedFiles(_ context.Context, req mcp.CallToolR
 	}
 
 	resp := changedFilesResponse{
+		Config: inst.name,
 		Files:  files,
 		Count:  len(files),
 		Method: method,
@@ -630,7 +647,12 @@ func (srv *mcpServer) handleGetBuildGraph(_ context.Context, req mcp.CallToolReq
 		return mcp.NewToolResultError("failed to read build graph: " + err.Error()), nil
 	}
 
-	data, err := json.Marshal(summary)
+	resp := buildGraphResponse{
+		Config:       inst.name,
+		GraphSummary: summary,
+	}
+
+	data, err := json.Marshal(resp)
 	if err != nil {
 		return mcp.NewToolResultError("failed to marshal response: " + err.Error()), nil
 	}
@@ -684,6 +706,7 @@ func (srv *mcpServer) handleSuggestFix(_ context.Context, req mcp.CallToolReques
 	snippet := strings.Join(lines[startLine-1:endLine], "\n")
 
 	resp := suggestFixResponse{
+		Config:    inst.name,
 		File:      diag.File,
 		StartLine: startLine,
 		EndLine:   endLine,

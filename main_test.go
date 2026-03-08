@@ -2326,6 +2326,407 @@ func TestPresetDerivedHybridBuildTimeout(t *testing.T) {
 	}
 }
 
+// --- config field in response tests ---
+
+// TestBuildResponseContainsConfigField verifies the build response includes the
+// resolved config name.
+func TestBuildResponseContainsConfigField(t *testing.T) {
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var raw map[string]interface{}
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	cfgVal, ok := raw["config"]
+	if !ok {
+		t.Fatal("expected 'config' field in build response JSON")
+	}
+	if cfgVal.(string) != "default" {
+		t.Fatalf("expected config 'default', got %q", cfgVal)
+	}
+}
+
+// TestGetErrorsResponseContainsConfigField verifies get_errors includes config.
+func TestGetErrorsResponseContainsConfigField(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv, _ := newTestServer(fb)
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleGetErrors(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]interface{}
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	cfgVal, ok := raw["config"]
+	if !ok {
+		t.Fatal("expected 'config' field in get_errors response JSON")
+	}
+	if cfgVal.(string) != "default" {
+		t.Fatalf("expected config 'default', got %q", cfgVal)
+	}
+}
+
+// TestGetWarningsResponseContainsConfigField verifies get_warnings includes config.
+func TestGetWarningsResponseContainsConfigField(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv, _ := newTestServer(fb)
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleGetWarnings(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var raw map[string]interface{}
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	cfgVal, ok := raw["config"]
+	if !ok {
+		t.Fatal("expected 'config' field in get_warnings response JSON")
+	}
+	if cfgVal.(string) != "default" {
+		t.Fatalf("expected config 'default', got %q", cfgVal)
+	}
+}
+
+// TestConfigureResponseContainsConfigField verifies configure includes config.
+func TestConfigureResponseContainsConfigField(t *testing.T) {
+	fb := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+	srv, _ := newTestServer(fb)
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleConfigure(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var raw map[string]interface{}
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	cfgVal, ok := raw["config"]
+	if !ok {
+		t.Fatal("expected 'config' field in configure response JSON")
+	}
+	if cfgVal.(string) != "default" {
+		t.Fatalf("expected config 'default', got %q", cfgVal)
+	}
+}
+
+// TestCleanResponseContainsConfigField verifies clean includes config.
+func TestCleanResponseContainsConfigField(t *testing.T) {
+	fb := &fakeBuilder{
+		cleanResult: &builder.BuildResult{ExitCode: 0},
+	}
+	srv, _ := newTestServer(fb)
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleClean(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var raw map[string]interface{}
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	cfgVal, ok := raw["config"]
+	if !ok {
+		t.Fatal("expected 'config' field in clean response JSON")
+	}
+	if cfgVal.(string) != "default" {
+		t.Fatalf("expected config 'default', got %q", cfgVal)
+	}
+}
+
+// TestGetChangedFilesResponseContainsConfigField verifies get_changed_files
+// includes config.
+func TestGetChangedFilesResponseContainsConfigField(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv, _ := newTestServer(fb)
+	tmpDir := t.TempDir()
+	srv.registry.defaultInstance().cfg.SourceDir = tmpDir
+	srv.registry.defaultInstance().cfg.BuildDir = tmpDir + "/build"
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleGetChangedFiles(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var raw map[string]interface{}
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	cfgVal, ok := raw["config"]
+	if !ok {
+		t.Fatal("expected 'config' field in get_changed_files response JSON")
+	}
+	if cfgVal.(string) != "default" {
+		t.Fatalf("expected config 'default', got %q", cfgVal)
+	}
+}
+
+// TestGetBuildGraphResponseContainsConfigField verifies get_build_graph includes
+// config.
+func TestGetBuildGraphResponseContainsConfigField(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv, _ := newTestServer(fb)
+	tmpDir := t.TempDir()
+	srv.registry.defaultInstance().cfg.BuildDir = tmpDir
+	srv.registry.defaultInstance().cfg.SourceDir = tmpDir
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleGetBuildGraph(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var raw map[string]interface{}
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	cfgVal, ok := raw["config"]
+	if !ok {
+		t.Fatal("expected 'config' field in get_build_graph response JSON")
+	}
+	if cfgVal.(string) != "default" {
+		t.Fatalf("expected config 'default', got %q", cfgVal)
+	}
+}
+
+// TestSuggestFixResponseContainsConfigField verifies suggest_fix includes config.
+func TestSuggestFixResponseContainsConfigField(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "test.cpp")
+	if err := os.WriteFile(srcFile, []byte("int main() {}\n"), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	if err := store.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	errs := []diagnostics.Diagnostic{
+		{File: srcFile, Line: 1, Severity: diagnostics.SeverityError, Message: "test error"},
+	}
+	store.FinishBuild(1, time.Second, errs, nil)
+
+	req := makeCallToolRequest(map[string]interface{}{"error_index": float64(0)})
+	result, err := srv.handleSuggestFix(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var raw map[string]interface{}
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	cfgVal, ok := raw["config"]
+	if !ok {
+		t.Fatal("expected 'config' field in suggest_fix response JSON")
+	}
+	if cfgVal.(string) != "default" {
+		t.Fatalf("expected config 'default', got %q", cfgVal)
+	}
+}
+
+// TestMultiConfigResponseRoutesConfigField verifies that when multiple configs
+// exist, each tool response includes the correct config name.
+func TestMultiConfigResponseRoutesConfigField(t *testing.T) {
+	debugFB := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+	releaseFB := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+
+	registry := newConfigRegistry("debug")
+	debugInst := &configInstance{
+		name:    "debug",
+		cfg:     &config.Config{BuildDir: "build/debug"},
+		builder: debugFB,
+		store:   state.NewStore(),
+	}
+	releaseInst := &configInstance{
+		name:    "release",
+		cfg:     &config.Config{BuildDir: "build/release"},
+		builder: releaseFB,
+		store:   state.NewStore(),
+	}
+	registry.add(debugInst)
+	registry.add(releaseInst)
+	srv := &mcpServer{registry: registry}
+
+	// Configure release and verify the response says "release".
+	req := makeCallToolRequest(map[string]interface{}{"config": "release"})
+	result, err := srv.handleConfigure(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var raw map[string]interface{}
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if raw["config"].(string) != "release" {
+		t.Fatalf("expected config 'release', got %q", raw["config"])
+	}
+
+	// Configure debug (default, no config param) and verify it says "debug".
+	req2 := makeCallToolRequest(nil)
+	result2, err := srv.handleConfigure(context.Background(), req2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result2.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result2))
+	}
+
+	var raw2 map[string]interface{}
+	text2 := extractText(t, result2)
+	if err := json.Unmarshal([]byte(text2), &raw2); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if raw2["config"].(string) != "debug" {
+		t.Fatalf("expected config 'debug', got %q", raw2["config"])
+	}
+}
+
+// TestBuildGraphTwoConfigsDifferentBuildDirs verifies that get_build_graph reads
+// compile_commands.json from the per-config build_dir, not a hardcoded path.
+func TestBuildGraphTwoConfigsDifferentBuildDirs(t *testing.T) {
+	// Create two temp dirs with different compile_commands.json.
+	debugDir := t.TempDir()
+	releaseDir := t.TempDir()
+
+	debugCC := `[{"directory": "/tmp", "command": "g++ -c debug.cpp", "file": "debug.cpp"}]`
+	releaseCC := `[{"directory": "/tmp", "command": "g++ -c release1.cpp", "file": "release1.cpp"},
+	               {"directory": "/tmp", "command": "g++ -c release2.cpp", "file": "release2.cpp"}]`
+
+	if err := os.WriteFile(filepath.Join(debugDir, "compile_commands.json"), []byte(debugCC), 0644); err != nil {
+		t.Fatalf("failed to write debug compile_commands.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(releaseDir, "compile_commands.json"), []byte(releaseCC), 0644); err != nil {
+		t.Fatalf("failed to write release compile_commands.json: %v", err)
+	}
+
+	registry := newConfigRegistry("debug")
+	registry.add(&configInstance{
+		name:    "debug",
+		cfg:     &config.Config{BuildDir: debugDir, SourceDir: debugDir},
+		builder: &fakeBuilder{},
+		store:   state.NewStore(),
+	})
+	registry.add(&configInstance{
+		name:    "release",
+		cfg:     &config.Config{BuildDir: releaseDir, SourceDir: releaseDir},
+		builder: &fakeBuilder{},
+		store:   state.NewStore(),
+	})
+	srv := &mcpServer{registry: registry}
+
+	// Query build graph for debug config.
+	debugReq := makeCallToolRequest(map[string]interface{}{"config": "debug"})
+	debugResult, err := srv.handleGetBuildGraph(context.Background(), debugReq)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if debugResult.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, debugResult))
+	}
+
+	var debugRaw map[string]interface{}
+	debugText := extractText(t, debugResult)
+	if err := json.Unmarshal([]byte(debugText), &debugRaw); err != nil {
+		t.Fatalf("failed to unmarshal debug response: %v", err)
+	}
+	if debugRaw["config"].(string) != "debug" {
+		t.Fatalf("expected config 'debug', got %q", debugRaw["config"])
+	}
+	if !debugRaw["available"].(bool) {
+		t.Fatal("expected debug build graph to be available")
+	}
+	if int(debugRaw["file_count"].(float64)) != 1 {
+		t.Fatalf("expected debug file_count 1, got %v", debugRaw["file_count"])
+	}
+
+	// Query build graph for release config.
+	releaseReq := makeCallToolRequest(map[string]interface{}{"config": "release"})
+	releaseResult, err := srv.handleGetBuildGraph(context.Background(), releaseReq)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if releaseResult.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, releaseResult))
+	}
+
+	var releaseRaw map[string]interface{}
+	releaseText := extractText(t, releaseResult)
+	if err := json.Unmarshal([]byte(releaseText), &releaseRaw); err != nil {
+		t.Fatalf("failed to unmarshal release response: %v", err)
+	}
+	if releaseRaw["config"].(string) != "release" {
+		t.Fatalf("expected config 'release', got %q", releaseRaw["config"])
+	}
+	if !releaseRaw["available"].(bool) {
+		t.Fatal("expected release build graph to be available")
+	}
+	if int(releaseRaw["file_count"].(float64)) != 2 {
+		t.Fatalf("expected release file_count 2, got %v", releaseRaw["file_count"])
+	}
+}
+
 // extractText extracts the text content from a CallToolResult.
 func extractText(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()
