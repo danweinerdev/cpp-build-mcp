@@ -170,16 +170,19 @@ Add to your `claude_desktop_config.json`:
 
 | Tool | Parameters | Response |
 |------|-----------|----------|
-| `configure` | `cmake_args?: string[]` | `{success, error_count, messages}` |
-| `build` | `targets?: string[], jobs?: number` | `{exit_code, error_count, warning_count, duration_ms, files_compiled}` |
-| `get_errors` | _(none)_ | `{errors: [{file, line, column, severity, message, code}]}` |
-| `get_warnings` | `filter?: string` | `{warnings: [...], count}` |
-| `suggest_fix` | `error_index: number` | `{file, start_line, end_line, source, diagnostic}` |
-| `clean` | `targets?: string[]` | `{success, message}` |
-| `get_changed_files` | _(none)_ | `{files, count, method}` |
-| `get_build_graph` | _(none)_ | `{available, file_count, translation_units, include_dirs}` |
+| `configure` | `config?: string, cmake_args?: string[]` | `{config, success, error_count, messages}` |
+| `build` | `config?: string, targets?: string[], jobs?: number` | `{config, exit_code, error_count, warning_count, duration_ms, files_compiled}` |
+| `get_errors` | `config?: string` | `{config, errors: [{file, line, column, severity, message, code}]}` |
+| `get_warnings` | `config?: string, filter?: string` | `{config, warnings: [...], count}` |
+| `suggest_fix` | `config?: string, error_index: number` | `{config, file, start_line, end_line, source, diagnostic}` |
+| `clean` | `config?: string, targets?: string[]` | `{config, success, message}` |
+| `get_changed_files` | `config?: string` | `{config, files, count, method}` |
+| `get_build_graph` | `config?: string` | `{config, available, file_count, translation_units, include_dirs}` |
+| `list_configs` | _(none)_ | `{configs: [{name, build_dir, status}], default_config}` |
 
-**Resource:** `build://health` — one-line status string: `OK`, `FAIL`, `READY`, `UNCONFIGURED`, or `DIRTY`.
+All tools accept an optional `config` parameter to target a specific named configuration. When omitted, the default configuration is used. Every response includes a `config` field identifying which configuration was acted on.
+
+**Resource:** `build://health` — one-line status string. With a single config: `OK: 0 errors, 2 warnings, last build 30s ago`. With multiple configs: pipe-separated aggregate like `debug: OK | release: FAIL(3 errors)`.
 
 ### Tool Details
 
@@ -203,10 +206,13 @@ Add to your `claude_desktop_config.json`:
 | `source_dir` | string | `"."` | Source directory |
 | `toolchain` | string | `"auto"` | `"auto"`, `"clang"`, `"gcc"`, `"msvc"` |
 | `generator` | string | `"ninja"` | `"ninja"` or `"make"` |
+| `preset` | string | `""` | CMake preset name (empty = no preset) |
 | `cmake_args` | string[] | `[]` | Extra CMake configure arguments |
 | `build_timeout` | string | `"5m"` | Max build duration (Go duration format) |
 | `inject_diagnostic_flags` | bool | `true` | Inject `-fdiagnostics-format=json` |
 | `diagnostic_serial_build` | bool | `false` | Force `-j1` for cleaner diagnostic output |
+| `configs` | object | _(none)_ | Map of named configurations (see [Multiple Build Configurations](#multiple-build-configurations)) |
+| `default_config` | string | _(first alphabetically)_ | Default configuration name when `configs` is present |
 
 ### Environment variable overrides
 
@@ -217,6 +223,90 @@ These take precedence over the config file:
 - `CPP_BUILD_MCP_TOOLCHAIN`
 - `CPP_BUILD_MCP_GENERATOR`
 - `CPP_BUILD_MCP_BUILD_TIMEOUT`
+
+## Multiple Build Configurations
+
+The server supports managing multiple named build configurations simultaneously. Each configuration has its own build directory, state machine, and diagnostics -- they are fully isolated from each other.
+
+### Config file with multiple configurations
+
+Use the `configs` map in `.cpp-build-mcp.json` to define named configurations. Top-level fields serve as defaults that each config inherits and can override:
+
+```json
+{
+  "source_dir": ".",
+  "toolchain": "auto",
+  "generator": "ninja",
+  "configs": {
+    "debug": {
+      "build_dir": "build/debug",
+      "cmake_args": ["-DCMAKE_BUILD_TYPE=Debug"]
+    },
+    "release": {
+      "build_dir": "build/release",
+      "cmake_args": ["-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON"]
+    },
+    "asan": {
+      "build_dir": "build/asan",
+      "cmake_args": ["-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_CXX_FLAGS=-fsanitize=address"]
+    }
+  },
+  "default_config": "debug"
+}
+```
+
+Each configuration must have a unique `build_dir`. The `default_config` field selects which configuration is used when no `config` parameter is specified in tool calls. If omitted, the alphabetically first configuration is used.
+
+Environment variable overrides are disabled in multi-config mode to preserve build directory uniqueness.
+
+### Multi-config session walkthrough
+
+A typical multi-config session with an AI agent:
+
+```
+You: "Build in both debug and release, fix any errors"
+
+Claude calls: list_configs()
+  -> {configs: [
+       {name: "debug", build_dir: "build/debug", status: "unconfigured"},
+       {name: "release", build_dir: "build/release", status: "unconfigured"}
+     ], default_config: "debug"}
+
+Claude calls: configure(config: "debug")
+  -> {config: "debug", success: true, error_count: 0, messages: []}
+
+Claude calls: configure(config: "release")
+  -> {config: "release", success: true, error_count: 0, messages: []}
+
+Claude calls: build(config: "debug")
+  -> {config: "debug", exit_code: 1, error_count: 2, warning_count: 0, duration_ms: 1420, files_compiled: 5}
+
+Claude calls: build(config: "release")
+  -> {config: "release", exit_code: 0, error_count: 0, warning_count: 1, duration_ms: 980, files_compiled: 5}
+
+Claude calls: get_errors(config: "debug")
+  -> {config: "debug", errors: [
+       {file: "src/main.cpp", line: 42, severity: "error", message: "..."},
+       {file: "src/util.cpp", line: 17, severity: "error", message: "..."}
+     ]}
+
+Claude reads: build://health
+  -> "debug: FAIL(2 errors) | release: OK"
+
+Claude fixes the errors, then:
+
+Claude calls: build(config: "debug")
+  -> {config: "debug", exit_code: 0, error_count: 0, warning_count: 0, duration_ms: 380, files_compiled: 2}
+
+Claude reads: build://health
+  -> "debug: OK | release: OK"
+```
+
+State is fully isolated between configurations: building debug does not affect release's state, and errors from one config never appear in another's `get_errors` output.
+
+### CMake Presets
+
+If your project has a `CMakePresets.json` file, the server automatically creates a named configuration for each non-hidden configure preset. The preset's `binaryDir` and `generator` are used for each config's `build_dir` and `generator`. Any fields in `.cpp-build-mcp.json` (except `build_dir`, `generator`, and `preset`) are merged as defaults across all preset-derived configs.
 
 ## Supported Toolchains
 
