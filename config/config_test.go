@@ -1093,7 +1093,7 @@ func TestLoadMulti_PresetDerived(t *testing.T) {
 		}`)
 		writeConfig(t, dir, `{
 			"build_dir": "should-be-ignored",
-			"generator": "make",
+			"generator": "ninja",
 			"preset": "should-be-ignored"
 		}`)
 
@@ -1112,6 +1112,9 @@ func TestLoadMulti_PresetDerived(t *testing.T) {
 
 		release := configs["release"]
 		assertEqual(t, "release.BuildDir", release.BuildDir, filepath.Join(dir, "build/release"))
+		// Generator from preset (Unix Makefiles -> make), NOT from .cpp-build-mcp.json (ninja).
+		// The config file says "ninja" but the preset says "Unix Makefiles" (normalizes to "make").
+		// This verifies the post-override guard actually restores the preset-derived generator.
 		assertEqual(t, "release.Generator", release.Generator, "make")
 		assertEqual(t, "release.Preset", release.Preset, "release")
 	})
@@ -1619,6 +1622,10 @@ func TestLoadMulti_EdgeCases(t *testing.T) {
 		}
 		if !strings.Contains(logOutput, "hidden") {
 			t.Errorf("expected log mentioning 'hidden' filter reason, got: %q", logOutput)
+		}
+		// Fallback warning should mention no usable presets.
+		if !strings.Contains(logOutput, "no usable configure presets") {
+			t.Errorf("expected fallback warning mentioning 'no usable configure presets', got: %q", logOutput)
 		}
 	})
 

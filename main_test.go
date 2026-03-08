@@ -41,9 +41,13 @@ type fakeBuilder struct {
 
 	// Captured dirty flag from the last SetDirty call.
 	lastDirtySet bool
+
+	// Set to true when Configure is called.
+	configureCalled bool
 }
 
 func (f *fakeBuilder) Configure(_ context.Context, args []string) (*builder.BuildResult, error) {
+	f.configureCalled = true
 	f.lastConfigureArgs = args
 	if f.configureErr != nil {
 		return nil, f.configureErr
@@ -2062,12 +2066,12 @@ func TestPresetDerivedConfigureDispatch(t *testing.T) {
 	}
 
 	// Verify the debug fakeBuilder was called (Configure dispatched to it).
-	// fakeBuilder.lastConfigureArgs is set on every Configure call, even if
-	// args is nil — it gets set to the args slice (which may be nil/empty).
-	// The key signal is that the store state for debug is now configured.
+	if !debugFB.configureCalled {
+		t.Fatal("debug builder Configure() was not called")
+	}
 
 	// Verify release builder was NOT called.
-	if releaseFB.lastConfigureArgs != nil {
+	if releaseFB.configureCalled {
 		t.Fatal("release builder Configure() was called when dispatching to debug")
 	}
 
