@@ -388,6 +388,7 @@ func TestLoadMulti(t *testing.T) {
 		dir := t.TempDir()
 		writeConfig(t, dir, `{
 			"inject_diagnostic_flags": true,
+			"cmake_args": ["-DSHARED=1"],
 			"configs": {
 				"a": {},
 				"b": {}
@@ -399,11 +400,22 @@ func TestLoadMulti(t *testing.T) {
 			t.Fatalf("LoadMulti() returned error: %v", err)
 		}
 
-		// Mutate one config and verify the other is unaffected.
+		// Mutate scalar field on one config and verify the other is unaffected.
 		configs["a"].InjectDiagnosticFlags = false
 
 		assertBool(t, "a.InjectDiagnosticFlags", configs["a"].InjectDiagnosticFlags, false)
 		assertBool(t, "b.InjectDiagnosticFlags", configs["b"].InjectDiagnosticFlags, true)
+
+		// Mutate inherited CMakeArgs slice on one config and verify the other
+		// is unaffected (no slice aliasing).
+		if len(configs["a"].CMakeArgs) != 1 || len(configs["b"].CMakeArgs) != 1 {
+			t.Fatalf("expected both configs to inherit 1 cmake arg, got a=%d b=%d",
+				len(configs["a"].CMakeArgs), len(configs["b"].CMakeArgs))
+		}
+		configs["a"].CMakeArgs[0] = "-DMUTATED=1"
+
+		assertEqual(t, "a.CMakeArgs[0]", configs["a"].CMakeArgs[0], "-DMUTATED=1")
+		assertEqual(t, "b.CMakeArgs[0]", configs["b"].CMakeArgs[0], "-DSHARED=1")
 	})
 
 	t.Run("default_config omitted picks alphabetically first", func(t *testing.T) {
@@ -422,6 +434,18 @@ func TestLoadMulti(t *testing.T) {
 		}
 
 		assertEqual(t, "defaultName", defaultName, "alpha")
+	})
+
+	t.Run("empty configs map returns error", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, `{
+			"configs": {}
+		}`)
+
+		_, _, err := LoadMulti(dir)
+		if err == nil {
+			t.Fatal("LoadMulti() should have returned an error for empty configs map")
+		}
 	})
 
 	t.Run("default_config not in configs map returns error", func(t *testing.T) {

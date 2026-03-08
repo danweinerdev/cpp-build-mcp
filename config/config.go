@@ -152,10 +152,18 @@ func LoadMulti(dir string) (map[string]*Config, string, error) {
 		return nil, "", fmt.Errorf("parsing config file %s: %w", path, err)
 	}
 
+	if len(file.Configs) == 0 {
+		return nil, "", fmt.Errorf("parsing config file %s: configs map is present but empty", path)
+	}
+
 	configs := make(map[string]*Config, len(file.Configs))
 	for name, raw := range file.Configs {
 		// Value copy of base so each config is independent.
 		entry := base
+		if base.CMakeArgs != nil {
+			entry.CMakeArgs = make([]string, len(base.CMakeArgs))
+			copy(entry.CMakeArgs, base.CMakeArgs)
+		}
 		if err := applyJSON(&entry, raw); err != nil {
 			return nil, "", fmt.Errorf("parsing config %q in %s: %w", name, path, err)
 		}
@@ -201,7 +209,9 @@ func applyJSON(cfg *Config, data []byte) error {
 		cfg.Generator = *raw.Generator
 	}
 	if raw.CMakeArgs != nil {
-		cfg.CMakeArgs = raw.CMakeArgs
+		cp := make([]string, len(raw.CMakeArgs))
+		copy(cp, raw.CMakeArgs)
+		cfg.CMakeArgs = cp
 	}
 	if raw.BuildTimeout != nil {
 		d, err := time.ParseDuration(*raw.BuildTimeout)
