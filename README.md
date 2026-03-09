@@ -209,7 +209,7 @@ All tools accept an optional `config` parameter to target a specific named confi
 | `preset` | string | `""` | CMake preset name (empty = no preset) |
 | `cmake_args` | string[] | `[]` | Extra CMake configure arguments |
 | `build_timeout` | string | `"5m"` | Max build duration (Go duration format) |
-| `inject_diagnostic_flags` | bool | `true` | Inject `-fdiagnostics-format=json` |
+| `inject_diagnostic_flags` | bool | `true` | Inject compiler diagnostic format flags via [CMAKE_PROJECT_INCLUDE](#diagnostic-format-injection) |
 | `diagnostic_serial_build` | bool | `false` | Force `-j1` for cleaner diagnostic output |
 | `configs` | object | _(none)_ | Map of named configurations (see [Multiple Build Configurations](#multiple-build-configurations)) |
 | `default_config` | string | _(first alphabetically)_ | Default configuration name when `configs` is present |
@@ -328,14 +328,49 @@ graph LR
     style REGEX fill:#fff3cd,stroke:#ffc107
 ```
 
-| Toolchain | Parser | Diagnostic Source |
-|-----------|--------|-------------------|
-| Clang | JSON (`-fdiagnostics-format=json`) | stdout |
-| GCC 10+ | JSON (`-fdiagnostics-format=json`) | stdout |
-| GCC < 10 | Regex fallback (auto-detected) | stderr |
-| MSVC | Regex fallback | stderr |
+| Toolchain | Parser | Format | Diagnostic Source |
+|-----------|--------|--------|-------------------|
+| Clang 14+ | SARIF (`-fdiagnostics-format=sarif`) | SARIF 2.1.0 | stdout or stderr |
+| Clang < 14 | JSON (`-fdiagnostics-format=json`) | JSON array | stdout |
+| GCC 10+ | JSON (`-fdiagnostics-format=json`) | JSON array | stdout (< 15) or stderr (15+) |
+| GCC < 10 | Regex fallback (auto-detected) | line-based | stderr |
+| MSVC | Regex fallback | line-based | stderr |
 
 When `toolchain` is `"auto"` (default), the server inspects `compile_commands.json` and probes the system compiler to select the best parser. GCC < 10 is automatically detected via version probing, and diagnostic flag injection is disabled to avoid passing unsupported flags.
+
+The Clang parser auto-detects the format by examining the first non-whitespace character of the output: `{` indicates SARIF, `[` indicates native Clang JSON. Both parsers check stdout first and fall back to stderr, handling GCC 15+ which moved JSON output to stderr.
+
+## Diagnostic Format Injection
+
+When `inject_diagnostic_flags` is `true` (the default), the server automatically configures the compiler to emit structured diagnostics during `configure`. This is the mechanism that makes everything work without any manual compiler flag setup.
+
+### How it works
+
+During `configure`, the server:
+
+1. **Writes** an embedded CMake module ([`builder/diagnostic_format.cmake`](builder/diagnostic_format.cmake)) into the build directory at `<build_dir>/.cpp-build-mcp/DiagnosticFormat.cmake`
+2. **Passes** `-DCMAKE_PROJECT_INCLUDE=<absolute_path>` to cmake, which causes the module to run after every `project()` call
+3. The module **probes** the active C and C++ compilers for structured diagnostic support:
+   - Tries GCC-style `-fdiagnostics-format=json` first (GCC 10+)
+   - Falls back to Clang-style `-fdiagnostics-format=sarif` with `-Wno-sarif-format-unstable` (Clang 14+)
+4. If a format is supported, the flags are **appended to `CMAKE_C_FLAGS` and `CMAKE_CXX_FLAGS`** globally
+
+After the module runs, these CMake variables are available to the project:
+
+| Variable | Description |
+|----------|-------------|
+| `CPP_BUILD_MCP_DIAG_SUPPORTED` | `TRUE` if structured diagnostics are available |
+| `CPP_BUILD_MCP_DIAG_FORMAT` | `"sarif"`, `"json"`, or `""` |
+| `CPP_BUILD_MCP_DIAG_C_FLAGS` | Flags appended to the C compiler |
+| `CPP_BUILD_MCP_DIAG_CXX_FLAGS` | Flags appended to the C++ compiler |
+
+### When to disable injection
+
+Set `inject_diagnostic_flags` to `false` if your project already configures structured diagnostic flags itself (e.g., via toolchain files or `CMakeLists.txt`). Projects can check `CPP_BUILD_MCP_DIAG_SUPPORTED` to detect whether the server already handled injection and skip their own probing.
+
+### For Make-based projects
+
+Make projects don't use `CMAKE_PROJECT_INCLUDE`. Instead, the server appends the diagnostic flag directly to `CFLAGS` and `CXXFLAGS` environment variables before invoking `make`. The flag is selected based on the configured toolchain: `-fdiagnostics-format=sarif -Wno-sarif-format-unstable` for Clang, `-fdiagnostics-format=json` for GCC.
 
 ## How It Works
 
