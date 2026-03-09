@@ -178,8 +178,9 @@ func assertDiagnosticFound(t *testing.T, diags []diagnostics.Diagnostic, fileSuf
 	}
 }
 
-// collectProgress returns a ProgressFunc that records each progress event and
-// a pointer to the collected slice. Each call creates independent state.
+// collectProgress returns a ProgressFunc that records each progress event and a
+// pointer to the collected slice. Each call creates independent state — callers
+// get their own slice with no shared globals between subtests.
 func collectProgress(t *testing.T) (builder.ProgressFunc, *[]progressEvent) {
 	t.Helper()
 	events := &[]progressEvent{}
@@ -330,6 +331,368 @@ func TestIntegrationDiagnosticInjection(t *testing.T) {
 			}
 			if result.ExitCode != 0 {
 				t.Fatalf("Build exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+			}
+		})
+	}
+}
+
+func TestIntegrationErrorDiagnostics(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	for _, tc := range toolchainCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			srcDir := copyFixture(t, "cmake-error")
+			buildDir := filepath.Join(srcDir, "build")
+
+			cfg := &config.Config{
+				SourceDir:             srcDir,
+				BuildDir:              buildDir,
+				Toolchain:             tc.toolchain,
+				Generator:             "ninja",
+				InjectDiagnosticFlags: true,
+				BuildTimeout:          2 * time.Minute,
+			}
+			b := builder.NewCMakeBuilder(cfg)
+			ctx := context.Background()
+
+			// Force CMake to use the specific compiler so the diagnostic
+			// format detection matches the toolchain expectation.
+			cxxCompiler := tc.compiler
+			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
+			if tc.toolchain == "gcc" {
+				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
+			}
+			extraArgs := []string{
+				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_C_COMPILER=" + cCompiler,
+			}
+
+			// Configure — should succeed.
+			result, err := b.Configure(ctx, extraArgs)
+			if err != nil {
+				t.Fatalf("Configure returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Configure exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+			}
+
+			// Build — should fail due to undeclared variable.
+			result, err = b.Build(ctx, nil, 0)
+			if err != nil {
+				t.Fatalf("Build returned error: %v", err)
+			}
+			if result.ExitCode == 0 {
+				t.Fatalf("Build should have failed but exit code was 0")
+			}
+
+			// Parse diagnostics.
+			parser := diagnostics.NewParser(tc.toolchain)
+			diags, err := parser.Parse(result.Stdout, result.Stderr)
+			if err != nil {
+				t.Fatalf("Parse returned error: %v", err)
+			}
+			if len(diags) == 0 {
+				t.Fatalf("expected at least one diagnostic, got none")
+			}
+
+			for _, d := range diags {
+				t.Logf("diagnostic: file=%s line=%d col=%d severity=%s message=%s", d.File, d.Line, d.Column, d.Severity, d.Message)
+			}
+
+			assertDiagnosticFound(t, diags, "main.cpp", diagnostics.SeverityError)
+		})
+	}
+}
+
+func TestIntegrationWarningDiagnostics(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	for _, tc := range toolchainCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			srcDir := copyFixture(t, "cmake-warning")
+			buildDir := filepath.Join(srcDir, "build")
+
+			cfg := &config.Config{
+				SourceDir:             srcDir,
+				BuildDir:              buildDir,
+				Toolchain:             tc.toolchain,
+				Generator:             "ninja",
+				InjectDiagnosticFlags: true,
+				BuildTimeout:          2 * time.Minute,
+			}
+			b := builder.NewCMakeBuilder(cfg)
+			ctx := context.Background()
+
+			// Force CMake to use the specific compiler so the diagnostic
+			// format detection matches the toolchain expectation.
+			cxxCompiler := tc.compiler
+			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
+			if tc.toolchain == "gcc" {
+				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
+			}
+			extraArgs := []string{
+				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_C_COMPILER=" + cCompiler,
+			}
+
+			// Configure — should succeed.
+			result, err := b.Configure(ctx, extraArgs)
+			if err != nil {
+				t.Fatalf("Configure returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Configure exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+			}
+
+			// Build — should succeed (warnings don't fail the build).
+			result, err = b.Build(ctx, nil, 0)
+			if err != nil {
+				t.Fatalf("Build returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Build exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+			}
+
+			// Parse diagnostics.
+			parser := diagnostics.NewParser(tc.toolchain)
+			diags, err := parser.Parse(result.Stdout, result.Stderr)
+			if err != nil {
+				t.Fatalf("Parse returned error: %v", err)
+			}
+			if len(diags) == 0 {
+				t.Fatalf("expected at least one diagnostic, got none")
+			}
+
+			for _, d := range diags {
+				t.Logf("diagnostic: file=%s line=%d col=%d severity=%s message=%s", d.File, d.Line, d.Column, d.Severity, d.Message)
+			}
+
+			assertDiagnosticFound(t, diags, "main.cpp", diagnostics.SeverityWarning)
+		})
+	}
+}
+
+func TestIntegrationMultiError(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	for _, tc := range toolchainCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			srcDir := copyFixture(t, "cmake-multi-error")
+			buildDir := filepath.Join(srcDir, "build")
+
+			cfg := &config.Config{
+				SourceDir:             srcDir,
+				BuildDir:              buildDir,
+				Toolchain:             tc.toolchain,
+				Generator:             "ninja",
+				InjectDiagnosticFlags: true,
+				DiagnosticSerialBuild: true,
+				BuildTimeout:          2 * time.Minute,
+			}
+			b := builder.NewCMakeBuilder(cfg)
+			ctx := context.Background()
+
+			// Force CMake to use the specific compiler so the diagnostic
+			// format detection matches the toolchain expectation.
+			cxxCompiler := tc.compiler
+			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
+			if tc.toolchain == "gcc" {
+				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
+			}
+			extraArgs := []string{
+				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_C_COMPILER=" + cCompiler,
+			}
+
+			// Configure — should succeed.
+			result, err := b.Configure(ctx, extraArgs)
+			if err != nil {
+				t.Fatalf("Configure returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Configure exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+			}
+
+			// Build — should fail due to undeclared variables in both files.
+			result, err = b.Build(ctx, nil, 0)
+			if err != nil {
+				t.Fatalf("Build returned error: %v", err)
+			}
+			if result.ExitCode == 0 {
+				t.Fatalf("Build should have failed but exit code was 0")
+			}
+
+			// Parse diagnostics.
+			parser := diagnostics.NewParser(tc.toolchain)
+			diags, err := parser.Parse(result.Stdout, result.Stderr)
+			if err != nil {
+				t.Fatalf("Parse returned error: %v", err)
+			}
+			if len(diags) < 2 {
+				t.Fatalf("expected at least 2 diagnostics, got %d", len(diags))
+			}
+
+			for _, d := range diags {
+				t.Logf("diagnostic: file=%s line=%d col=%d severity=%s message=%s", d.File, d.Line, d.Column, d.Severity, d.Message)
+			}
+
+			assertDiagnosticFound(t, diags, "a.cpp", diagnostics.SeverityError)
+			assertDiagnosticFound(t, diags, "b.cpp", diagnostics.SeverityError)
+		})
+	}
+}
+
+func TestIntegrationMixedDiagnostics(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	for _, tc := range toolchainCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			srcDir := copyFixture(t, "cmake-mixed-diagnostics")
+			buildDir := filepath.Join(srcDir, "build")
+
+			cfg := &config.Config{
+				SourceDir:             srcDir,
+				BuildDir:              buildDir,
+				Toolchain:             tc.toolchain,
+				Generator:             "ninja",
+				InjectDiagnosticFlags: true,
+				DiagnosticSerialBuild: true,
+				BuildTimeout:          2 * time.Minute,
+			}
+			b := builder.NewCMakeBuilder(cfg)
+			ctx := context.Background()
+
+			// Force CMake to use the specific compiler so the diagnostic
+			// format detection matches the toolchain expectation.
+			cxxCompiler := tc.compiler
+			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
+			if tc.toolchain == "gcc" {
+				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
+			}
+			extraArgs := []string{
+				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_C_COMPILER=" + cCompiler,
+			}
+
+			// Configure — should succeed.
+			result, err := b.Configure(ctx, extraArgs)
+			if err != nil {
+				t.Fatalf("Configure returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Configure exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+			}
+
+			// Build — should fail due to undeclared variable in bad.cpp.
+			result, err = b.Build(ctx, nil, 0)
+			if err != nil {
+				t.Fatalf("Build returned error: %v", err)
+			}
+			if result.ExitCode == 0 {
+				t.Fatalf("Build should have failed but exit code was 0")
+			}
+
+			// Parse diagnostics.
+			parser := diagnostics.NewParser(tc.toolchain)
+			diags, err := parser.Parse(result.Stdout, result.Stderr)
+			if err != nil {
+				t.Fatalf("Parse returned error: %v", err)
+			}
+			if len(diags) < 2 {
+				t.Fatalf("expected at least 2 diagnostics, got %d", len(diags))
+			}
+
+			for _, d := range diags {
+				t.Logf("diagnostic: file=%s line=%d col=%d severity=%s message=%s", d.File, d.Line, d.Column, d.Severity, d.Message)
+			}
+
+			assertDiagnosticFound(t, diags, "bad.cpp", diagnostics.SeverityError)
+			assertDiagnosticFound(t, diags, "good.cpp", diagnostics.SeverityWarning)
+		})
+	}
+}
+
+func TestIntegrationNoteDiagnostics(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	for _, tc := range toolchainCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			srcDir := copyFixture(t, "cmake-note")
+			buildDir := filepath.Join(srcDir, "build")
+
+			cfg := &config.Config{
+				SourceDir:             srcDir,
+				BuildDir:              buildDir,
+				Toolchain:             tc.toolchain,
+				Generator:             "ninja",
+				InjectDiagnosticFlags: true,
+				BuildTimeout:          2 * time.Minute,
+			}
+			b := builder.NewCMakeBuilder(cfg)
+			ctx := context.Background()
+
+			// Force CMake to use the specific compiler so the diagnostic
+			// format detection matches the toolchain expectation.
+			cxxCompiler := tc.compiler
+			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
+			if tc.toolchain == "gcc" {
+				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
+			}
+			extraArgs := []string{
+				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_C_COMPILER=" + cCompiler,
+			}
+
+			// Configure — should succeed.
+			result, err := b.Configure(ctx, extraArgs)
+			if err != nil {
+				t.Fatalf("Configure returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Configure exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+			}
+
+			// Build — should fail due to overload resolution failure.
+			result, err = b.Build(ctx, nil, 0)
+			if err != nil {
+				t.Fatalf("Build returned error: %v", err)
+			}
+			if result.ExitCode == 0 {
+				t.Fatalf("Build should have failed but exit code was 0")
+			}
+
+			// Parse diagnostics.
+			parser := diagnostics.NewParser(tc.toolchain)
+			diags, err := parser.Parse(result.Stdout, result.Stderr)
+			if err != nil {
+				t.Fatalf("Parse returned error: %v", err)
+			}
+			if len(diags) == 0 {
+				t.Fatalf("expected at least one diagnostic, got none")
+			}
+
+			for _, d := range diags {
+				t.Logf("diagnostic: file=%s line=%d col=%d severity=%s message=%s", d.File, d.Line, d.Column, d.Severity, d.Message)
+			}
+
+			// Check if any diagnostic has note severity — do NOT hard-fail
+			// if no note found since not all compilers emit notes for this pattern.
+			hasNote := false
+			for _, d := range diags {
+				if d.Severity == diagnostics.SeverityNote {
+					hasNote = true
+					break
+				}
+			}
+			if hasNote {
+				t.Logf("note-level diagnostic found (compiler emits notes)")
+			} else {
+				t.Logf("no note-level diagnostic found (compiler may not emit notes for this pattern)")
 			}
 		})
 	}

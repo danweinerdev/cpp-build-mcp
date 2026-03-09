@@ -48,7 +48,14 @@ type gccDiagnostic struct {
 // Parse parses GCC JSON diagnostic output into []Diagnostic.
 // Stdout is checked first; if empty after trimming, stderr is used as a
 // fallback (GCC 15+ writes JSON diagnostics to stderr).
+// Ninja build system noise (progress lines, failure preamble, summary lines)
+// is stripped from both streams before parsing to prevent it from being
+// mistaken for JSON array content.
 func (p *GCCParser) Parse(stdout, stderr string) ([]Diagnostic, error) {
+	// Strip Ninja noise from both streams before format detection.
+	stdout = stripNinjaNoise(stdout)
+	stderr = stripNinjaNoise(stderr)
+
 	input := strings.TrimSpace(stdout)
 	if input == "" {
 		input = strings.TrimSpace(stderr)

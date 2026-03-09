@@ -13,6 +13,34 @@ import (
 // parsing Clang JSON diagnostics.
 var ninjaProgressRe = regexp.MustCompile(`(?m)^\[\d+/\d+\].*$`)
 
+// ninjaFailedRe matches Ninja failure preamble lines such as
+// "FAILED: [code=1] CMakeFiles/main.dir/a.cpp.o" that appear in build output
+// before the compiler's diagnostic JSON. These lines contain '[' characters
+// that can confuse JSON format detection.
+var ninjaFailedRe = regexp.MustCompile(`(?m)^FAILED:.*$`)
+
+// ninjaSummaryRe matches Ninja summary lines at the end of build output,
+// e.g., "ninja: build stopped: subcommand failed." These appear after the
+// compiler's diagnostic JSON output.
+var ninjaSummaryRe = regexp.MustCompile(`(?m)^ninja:.*$`)
+
+// compilerCountRe matches compiler summary lines like "1 error generated." or
+// "2 warnings generated." that Clang appends after its diagnostic output.
+var compilerCountRe = regexp.MustCompile(`(?m)^\d+ (?:error|warning)s? generated\.$`)
+
+// stripNinjaNoise removes Ninja build system output lines and compiler
+// summary lines from s, leaving only the compiler's structured diagnostic
+// output. This includes progress lines ("[1/42] Building ..."), failure
+// preamble ("FAILED: ..."), summary ("ninja: build stopped ..."), and
+// compiler diagnostics count ("1 error generated.").
+func stripNinjaNoise(s string) string {
+	s = ninjaProgressRe.ReplaceAllString(s, "")
+	s = ninjaFailedRe.ReplaceAllString(s, "")
+	s = ninjaSummaryRe.ReplaceAllString(s, "")
+	s = compilerCountRe.ReplaceAllString(s, "")
+	return s
+}
+
 // ClangParser parses Clang diagnostic output into structured Diagnostics.
 //
 // ClangParser auto-detects two formats: SARIF 2.1.0 (from
@@ -38,10 +66,15 @@ type clangDiagnostic struct {
 // It auto-detects the format: '{' → SARIF (from -fdiagnostics-format=sarif),
 // '[' → native Clang JSON. Stdout is checked first; if it has no structured
 // content after stripping Ninja progress lines, stderr is used as a fallback.
+//
+// Ninja build output may contain non-JSON text (FAILED: lines, compiler
+// invocation lines) surrounding the actual JSON diagnostic output. After
+// stripping Ninja progress lines, the parser also strips Ninja failure
+// preamble lines so that format detection sees the JSON content.
 func (p *ClangParser) Parse(stdout, stderr string) ([]Diagnostic, error) {
-	// Strip Ninja progress lines from both streams before format detection.
-	stdout = ninjaProgressRe.ReplaceAllString(stdout, "")
-	stderr = ninjaProgressRe.ReplaceAllString(stderr, "")
+	// Strip Ninja progress lines and failure preamble from both streams.
+	stdout = stripNinjaNoise(stdout)
+	stderr = stripNinjaNoise(stderr)
 
 	// Select stream: stdout first, stderr fallback.
 	var input string
@@ -96,30 +129,31 @@ func (p *ClangParser) parseClangJSON(input string) ([]Diagnostic, error) {
 }
 
 // hasStructuredContent reports whether s contains structured JSON content
-// (first non-whitespace character is '{' or '[').
+// (a '{' or '[' character that could begin a JSON value). The check scans
+// the entire string rather than only the first character, because Ninja
+// build output may prepend non-JSON text (compiler invocation lines, etc.)
+// before the actual diagnostic JSON even after progress/failure lines have
+// been stripped.
 func hasStructuredContent(s string) bool {
-	trimmed := strings.TrimSpace(s)
-	if trimmed == "" {
-		return false
-	}
-	return trimmed[0] == '{' || trimmed[0] == '['
+	return strings.ContainsAny(s, "{[")
 }
 
-// detectOutputFormat returns "sarif" if the first non-whitespace character is '{',
-// "clang-json" if it's '[', or "" otherwise.
+// detectOutputFormat scans s for the first '{' or '[' character and returns
+// "sarif" if '{' appears first (SARIF 2.1.0 from -fdiagnostics-format=sarif),
+// "clang-json" if '[' appears first (native Clang JSON array), or "" if
+// neither is found. Scanning the full string (rather than only the first
+// character) allows detection even when non-JSON text (compiler invocation
+// lines, etc.) precedes the diagnostic output.
 func detectOutputFormat(s string) string {
-	trimmed := strings.TrimSpace(s)
-	if trimmed == "" {
-		return ""
+	for _, ch := range s {
+		switch ch {
+		case '{':
+			return "sarif"
+		case '[':
+			return "clang-json"
+		}
 	}
-	switch trimmed[0] {
-	case '{':
-		return "sarif"
-	case '[':
-		return "clang-json"
-	default:
-		return ""
-	}
+	return ""
 }
 
 // splitJSONArrays splits a string that may contain multiple concatenated JSON

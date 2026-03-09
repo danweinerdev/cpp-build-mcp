@@ -76,6 +76,9 @@ func (b *MakeBuilder) buildBuildArgs(targets []string, jobs int) []string {
 
 	if b.cfg.DiagnosticSerialBuild {
 		jobs = 1
+		// Keep going despite failures so diagnostic output is collected from
+		// all translation units, not just the first one that fails.
+		args = append(args, "-k")
 	}
 	if jobs > 0 {
 		args = append(args, fmt.Sprintf("-j%d", jobs))
