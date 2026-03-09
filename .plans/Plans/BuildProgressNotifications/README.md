@@ -29,7 +29,7 @@ Add real-time build progress reporting to the `build` tool using MCP's `notifica
 The implementation follows the approved design in `Designs/BuildProgressNotifications/README.md`. Key points:
 
 - `ProgressFunc` type and `SetProgressFunc` method added to `CMakeBuilder` (NOT the `Builder` interface)
-- `run()` modified to tee stderr via `io.MultiWriter` to both a buffer and a pipe feeding a scanner goroutine
+- `run()` modified to tee stdout via `io.MultiWriter` to both a buffer and a pipe feeding a scanner goroutine (Ninja writes `[N/M]` progress to stdout)
 - Scanner goroutine matches `^\[(\d+)/(\d+)\]` lines and calls `ProgressFunc` with throttling (250ms default, final line always sent)
 - `handleBuild` uses a `progressSetter` type assertion to conditionally wire up notifications
 - `sync.WaitGroup` ensures goroutine completes before `run()` returns
@@ -37,7 +37,7 @@ The implementation follows the approved design in `Designs/BuildProgressNotifica
 ## Key Decisions
 
 1. **No `Builder` interface change** — `progressSetter` type assertion keeps fakes and `MakeBuilder` unchanged
-2. **`io.MultiWriter` tee** — preserves existing `BuildResult.Stderr` accumulation pattern
+2. **`io.MultiWriter` tee on stdout** — preserves existing `BuildResult.Stdout` accumulation while feeding scanner
 3. **250ms time-based throttle** — stored as `progressMinInterval` field on builder for test overriding
 4. **Make builds excluded** — `MakeBuilder` doesn't implement `progressSetter`
 5. **Configure progress deferred** — no structured progress format for cmake configure
