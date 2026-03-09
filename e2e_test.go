@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"strings"
+
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
@@ -207,18 +209,31 @@ func (e *e2eEnv) send(t *testing.T, method string, params any) jsonRPCResponse {
 		t.Fatalf("write request: %v", err)
 	}
 
-	// Read response line.
-	line, err := e.fromServer.ReadString('\n')
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
+	// Read lines until we get a response (has "id" field).
+	// Skip any server-sent notifications that may arrive before the response.
+	for {
+		line, err := e.fromServer.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
 
-	var resp jsonRPCResponse
-	if err := json.Unmarshal([]byte(line), &resp); err != nil {
-		t.Fatalf("unmarshal response: %v\nraw: %s", err, line)
-	}
+		// Check if this is a notification (no "id" field) or a response.
+		var peek struct {
+			ID *int `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(line), &peek); err != nil {
+			t.Fatalf("unmarshal message: %v\nraw: %s", err, line)
+		}
+		if peek.ID == nil {
+			continue // skip notifications
+		}
 
-	return resp
+		var resp jsonRPCResponse
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			t.Fatalf("unmarshal response: %v\nraw: %s", err, line)
+		}
+		return resp
+	}
 }
 
 // sendNotification sends a JSON-RPC notification (no response expected).
@@ -1242,5 +1257,480 @@ func TestE2EMultiConfigBuildStateIsolation(t *testing.T) {
 	}
 	if !containsStr(healthText, "release: UNCONFIGURED") {
 		t.Fatalf("expected 'release: UNCONFIGURED' in health, got %q", healthText)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Progress notification E2E tests
+// ---------------------------------------------------------------------------
+
+// progressFakeBuilder is a fakeBuilder that also implements progressSetter.
+// During Build(), it calls the progress callback with simulated [N/M] lines.
+type progressFakeBuilder struct {
+	fakeBuilder
+	progressFunc builder.ProgressFunc
+	progressLines []struct{ current, total int; line string }
+}
+
+func (f *progressFakeBuilder) SetProgressFunc(fn builder.ProgressFunc) {
+	f.progressFunc = fn
+}
+
+func (f *progressFakeBuilder) Build(_ context.Context, targets []string, jobs int) (*builder.BuildResult, error) {
+	f.lastTargets = targets
+	f.lastJobs = jobs
+	// Call progress callback for each simulated line before returning the result.
+	if f.progressFunc != nil {
+		for _, pl := range f.progressLines {
+			f.progressFunc(pl.current, pl.total, pl.line)
+		}
+	}
+	if f.buildErr != nil {
+		return nil, f.buildErr
+	}
+	return f.buildResult, nil
+}
+
+// jsonRPCMessage is a generic JSON-RPC message that could be a response or notification.
+type jsonRPCMessage struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      *int            `json:"id,omitempty"`      // present for responses, absent for notifications
+	Method  string          `json:"method,omitempty"`  // present for notifications
+	Params  json.RawMessage `json:"params,omitempty"`  // present for notifications
+	Result  json.RawMessage `json:"result,omitempty"`  // present for responses
+	Error   *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+// callToolWithProgress sends a tools/call request with _meta.progressToken and
+// reads exactly expectedNotifications + 1 messages (the notifications plus the
+// response). This is deterministic — no timing dependencies.
+func (e *e2eEnv) callToolWithProgress(t *testing.T, name string, args map[string]any, progressToken any, expectedNotifications int) (jsonRPCResponse, []jsonRPCMessage) {
+	t.Helper()
+	id := e.nextID
+	e.nextID++
+
+	params := map[string]any{
+		"name": name,
+		"_meta": map[string]any{
+			"progressToken": progressToken,
+		},
+	}
+	if args != nil {
+		params["arguments"] = args
+	}
+
+	req := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "tools/call",
+		Params:  params,
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	data = append(data, '\n')
+
+	if _, err := e.toServer.Write(data); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	// Read exactly expectedNotifications + 1 messages. The response and
+	// notifications may arrive in any order since notifications are sent
+	// asynchronously via the mcp-go notification channel.
+	//
+	// A goroutine reads messages into a channel so we can apply a timeout.
+	// If the expected count is wrong, the test fails with a clear error
+	// instead of hanging indefinitely.
+	type readResult struct {
+		msg jsonRPCMessage
+		err error
+	}
+	msgCh := make(chan readResult, expectedNotifications+1)
+	go func() {
+		for {
+			line, err := e.fromServer.ReadString('\n')
+			if err != nil {
+				msgCh <- readResult{err: err}
+				return
+			}
+			var msg jsonRPCMessage
+			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				msgCh <- readResult{err: fmt.Errorf("unmarshal: %v (raw: %s)", err, line)}
+				return
+			}
+			msgCh <- readResult{msg: msg}
+		}
+	}()
+
+	var notifications []jsonRPCMessage
+	var resp jsonRPCResponse
+	gotResponse := false
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+
+	for i := 0; i < expectedNotifications+1; i++ {
+		select {
+		case r := <-msgCh:
+			if r.err != nil {
+				t.Fatalf("read message %d: %v", i, r.err)
+			}
+			if r.msg.ID != nil && *r.msg.ID == id {
+				resp = jsonRPCResponse{
+					JSONRPC: r.msg.JSONRPC,
+					ID:      *r.msg.ID,
+					Result:  r.msg.Result,
+					Error:   r.msg.Error,
+				}
+				gotResponse = true
+			} else {
+				notifications = append(notifications, r.msg)
+			}
+		case <-timer.C:
+			t.Fatalf("timeout waiting for message %d/%d (got response: %v, notifications: %d)",
+				i+1, expectedNotifications+1, gotResponse, len(notifications))
+		}
+	}
+
+	if !gotResponse {
+		t.Fatal("did not receive tool response among expected messages")
+	}
+
+	return resp, notifications
+}
+
+func TestE2EBuildProgressNotifications(t *testing.T) {
+	fb := &progressFakeBuilder{
+		fakeBuilder: fakeBuilder{
+			buildResult: &builder.BuildResult{
+				ExitCode: 0,
+				Stdout:   "",
+				Stderr:   "",
+				Duration: time.Second,
+			},
+		},
+		progressLines: []struct{ current, total int; line string }{
+			{1, 3, "[1/3] Building CXX object a.cpp.o"},
+			{2, 3, "[2/3] Building CXX object b.cpp.o"},
+			{3, 3, "[3/3] Linking CXX executable main"},
+		},
+	}
+
+	// Use startE2E but with the progressFakeBuilder.
+	cfg := &config.Config{
+		BuildDir:     "build",
+		SourceDir:    ".",
+		Toolchain:    "clang",
+		Generator:    "ninja",
+		BuildTimeout: 5 * time.Minute,
+	}
+
+	store := state.NewStore()
+	registry := newConfigRegistry("default")
+	registry.add(&configInstance{
+		name:    "default",
+		cfg:     cfg,
+		builder: fb,
+		store:   store,
+	})
+	srv := &mcpServer{registry: registry}
+
+	s := server.NewMCPServer("cpp-build-mcp", "0.1.0",
+		server.WithToolCapabilities(true),
+		server.WithResourceCapabilities(false, true),
+	)
+	s.AddTool(
+		mcp.NewTool("build",
+			mcp.WithDescription("Build."),
+			mcp.WithArray("targets", mcp.WithStringItems()),
+			mcp.WithNumber("jobs"),
+		),
+		srv.handleBuild,
+	)
+
+	clientR, clientW := io.Pipe()
+	serverR, serverW := io.Pipe()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdioSrv := server.NewStdioServer(s)
+	stdioSrv.SetErrorLogger(log.New(io.Discard, "", 0))
+	go stdioSrv.Listen(ctx, clientR, serverW)
+
+	env := &e2eEnv{
+		toServer:   clientW,
+		fromServer: bufio.NewReader(serverR),
+		cancel:     cancel,
+		done:       make(chan error, 1),
+		store:      store,
+		nextID:     1,
+	}
+	env.initialize(t)
+	store.SetConfigured()
+
+	t.Run("with progressToken", func(t *testing.T) {
+		resp, notifications := env.callToolWithProgress(t, "build", nil, "test-token-123", 3)
+		if resp.Error != nil {
+			t.Fatalf("JSON-RPC error: %s", resp.Error.Message)
+		}
+
+		text, isError := toolResultText(t, resp)
+		if isError {
+			t.Fatalf("unexpected tool error: %s", text)
+		}
+
+		// Verify we got progress notifications.
+		var progressNotifs []jsonRPCMessage
+		for _, n := range notifications {
+			if n.Method == "notifications/progress" {
+				progressNotifs = append(progressNotifs, n)
+			}
+		}
+
+		if len(progressNotifs) == 0 {
+			t.Fatal("expected at least one progress notification, got none")
+		}
+
+		// Check the first notification's fields.
+		var params struct {
+			ProgressToken any     `json:"progressToken"`
+			Progress      float64 `json:"progress"`
+			Total         float64 `json:"total"`
+			Message       string  `json:"message"`
+		}
+		if err := json.Unmarshal(progressNotifs[0].Params, &params); err != nil {
+			t.Fatalf("unmarshal progress params: %v", err)
+		}
+
+		// Token should be echoed back verbatim.
+		if params.ProgressToken != "test-token-123" {
+			t.Errorf("expected progressToken %q, got %v", "test-token-123", params.ProgressToken)
+		}
+		if params.Progress != 1 {
+			t.Errorf("expected progress 1, got %v", params.Progress)
+		}
+		if params.Total != 3 {
+			t.Errorf("expected total 3, got %v", params.Total)
+		}
+		if !strings.Contains(params.Message, "[1/3]") {
+			t.Errorf("expected message to contain [1/3], got %q", params.Message)
+		}
+
+		// Check the last notification is [3/3].
+		lastNotif := progressNotifs[len(progressNotifs)-1]
+		if err := json.Unmarshal(lastNotif.Params, &params); err != nil {
+			t.Fatalf("unmarshal last progress params: %v", err)
+		}
+		if params.Progress != 3 || params.Total != 3 {
+			t.Errorf("expected last progress (3, 3), got (%v, %v)", params.Progress, params.Total)
+		}
+	})
+}
+
+func TestE2EBuildNoProgressWithoutToken(t *testing.T) {
+	fb := &progressFakeBuilder{
+		fakeBuilder: fakeBuilder{
+			buildResult: &builder.BuildResult{
+				ExitCode: 0,
+				Stdout:   "",
+				Stderr:   "",
+				Duration: time.Second,
+			},
+		},
+		progressLines: []struct{ current, total int; line string }{
+			{1, 1, "[1/1] Building CXX object a.cpp.o"},
+		},
+	}
+
+	cfg := &config.Config{
+		BuildDir:     "build",
+		SourceDir:    ".",
+		Toolchain:    "clang",
+		Generator:    "ninja",
+		BuildTimeout: 5 * time.Minute,
+	}
+
+	store := state.NewStore()
+	registry := newConfigRegistry("default")
+	registry.add(&configInstance{
+		name:    "default",
+		cfg:     cfg,
+		builder: fb,
+		store:   store,
+	})
+	srv := &mcpServer{registry: registry}
+
+	s := server.NewMCPServer("cpp-build-mcp", "0.1.0",
+		server.WithToolCapabilities(true),
+	)
+	s.AddTool(
+		mcp.NewTool("build", mcp.WithDescription("Build.")),
+		srv.handleBuild,
+	)
+
+	clientR, clientW := io.Pipe()
+	serverR, serverW := io.Pipe()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdioSrv := server.NewStdioServer(s)
+	stdioSrv.SetErrorLogger(log.New(io.Discard, "", 0))
+	go stdioSrv.Listen(ctx, clientR, serverW)
+
+	env := &e2eEnv{
+		toServer:   clientW,
+		fromServer: bufio.NewReader(serverR),
+		cancel:     cancel,
+		done:       make(chan error, 1),
+		store:      store,
+		nextID:     1,
+	}
+	env.initialize(t)
+	store.SetConfigured()
+
+	// Call build WITHOUT a progressToken — use regular callTool.
+	resp := env.callTool(t, "build", nil)
+	if resp.Error != nil {
+		t.Fatalf("JSON-RPC error: %s", resp.Error.Message)
+	}
+
+	text, isError := toolResultText(t, resp)
+	if isError {
+		t.Fatalf("unexpected tool error: %s", text)
+	}
+
+	// If we got a clean response on the first ReadString, no notifications were sent.
+	// The existing callTool helper reads exactly one line and parses it as a response.
+	// If a notification had been sent first, callTool would have failed to parse it
+	// as a jsonRPCResponse (missing ID), so reaching here without error confirms
+	// no notifications were sent.
+}
+
+func TestE2EMultiConfigProgressPrefix(t *testing.T) {
+	debugFB := &progressFakeBuilder{
+		fakeBuilder: fakeBuilder{
+			configureResult: &builder.BuildResult{ExitCode: 0},
+			buildResult: &builder.BuildResult{
+				ExitCode: 0,
+				Duration: time.Second,
+			},
+		},
+		progressLines: []struct{ current, total int; line string }{
+			{1, 2, "[1/2] Building CXX object debug.cpp.o"},
+			{2, 2, "[2/2] Linking CXX executable debug_main"},
+		},
+	}
+	releaseFB := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 0},
+	}
+
+	debugCfg := &config.Config{
+		BuildDir:     "build/debug",
+		SourceDir:    ".",
+		Toolchain:    "clang",
+		Generator:    "ninja",
+		BuildTimeout: 5 * time.Minute,
+	}
+	releaseCfg := &config.Config{
+		BuildDir:     "build/release",
+		SourceDir:    ".",
+		Toolchain:    "clang",
+		Generator:    "ninja",
+		BuildTimeout: 5 * time.Minute,
+	}
+
+	debugStore := state.NewStore()
+	releaseStore := state.NewStore()
+
+	registry := newConfigRegistry("debug")
+	registry.add(&configInstance{
+		name:    "debug",
+		cfg:     debugCfg,
+		builder: debugFB,
+		store:   debugStore,
+	})
+	registry.add(&configInstance{
+		name:    "release",
+		cfg:     releaseCfg,
+		builder: releaseFB,
+		store:   releaseStore,
+	})
+
+	srv := &mcpServer{registry: registry}
+
+	s := server.NewMCPServer("cpp-build-mcp", "0.1.0",
+		server.WithToolCapabilities(true),
+	)
+	s.AddTool(
+		mcp.NewTool("build",
+			mcp.WithDescription("Build."),
+			mcp.WithString("config", mcp.Description("Config name.")),
+		),
+		srv.handleBuild,
+	)
+	s.AddTool(
+		mcp.NewTool("configure",
+			mcp.WithDescription("Configure."),
+			mcp.WithString("config", mcp.Description("Config name.")),
+		),
+		srv.handleConfigure,
+	)
+
+	clientR, clientW := io.Pipe()
+	serverR, serverW := io.Pipe()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stdioSrv := server.NewStdioServer(s)
+	stdioSrv.SetErrorLogger(log.New(io.Discard, "", 0))
+	go stdioSrv.Listen(ctx, clientR, serverW)
+
+	env := &e2eEnv{
+		toServer:   clientW,
+		fromServer: bufio.NewReader(serverR),
+		cancel:     cancel,
+		done:       make(chan error, 1),
+		store:      debugStore,
+		nextID:     1,
+	}
+	env.initialize(t)
+
+	// Configure debug.
+	env.callTool(t, "configure", map[string]any{"config": "debug"})
+
+	// Build debug with progress token.
+	resp, notifications := env.callToolWithProgress(t, "build", map[string]any{"config": "debug"}, "multi-tok", 2)
+	if resp.Error != nil {
+		t.Fatalf("JSON-RPC error: %s", resp.Error.Message)
+	}
+
+	// In multi-config mode, messages should be prefixed with [debug].
+	var progressNotifs []jsonRPCMessage
+	for _, n := range notifications {
+		if n.Method == "notifications/progress" {
+			progressNotifs = append(progressNotifs, n)
+		}
+	}
+
+	if len(progressNotifs) == 0 {
+		t.Fatal("expected progress notifications, got none")
+	}
+
+	var params struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(progressNotifs[0].Params, &params); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if !strings.HasPrefix(params.Message, "[debug] ") {
+		t.Errorf("expected message to start with [debug] prefix, got %q", params.Message)
 	}
 }

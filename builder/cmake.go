@@ -1,28 +1,54 @@
 package builder
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
+	"regexp"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/danweinerdev/cpp-build-mcp/config"
 )
 
+// ProgressFunc is called with build progress updates. current and total
+// correspond to Ninja's [current/total] progress line. message is the
+// full progress line text.
+type ProgressFunc func(current, total int, message string)
+
+// ninjaProgressRe matches Ninja progress lines like [1/803] and captures
+// both the current (N) and total (M) values.
+var ninjaProgressRe = regexp.MustCompile(`^\[(\d+)/(\d+)\]`)
+
 // CMakeBuilder implements the Builder interface using CMake as the meta-build
 // system. It supports Ninja as the build tool (make support is planned).
 type CMakeBuilder struct {
-	cfg   *config.Config
-	dirty bool
+	cfg                 *config.Config
+	dirty               bool
+	progressFunc        ProgressFunc
+	progressMinInterval time.Duration
 }
 
 // NewCMakeBuilder creates a CMakeBuilder for the given configuration.
 func NewCMakeBuilder(cfg *config.Config) *CMakeBuilder {
-	return &CMakeBuilder{cfg: cfg}
+	return &CMakeBuilder{
+		cfg:                 cfg,
+		progressMinInterval: 250 * time.Millisecond,
+	}
+}
+
+// SetProgressFunc sets an optional progress callback for the next Build call.
+// Pass nil to disable. The callback is not cleared automatically — the caller
+// is responsible for clearing it after Build returns.
+func (b *CMakeBuilder) SetProgressFunc(fn ProgressFunc) {
+	b.progressFunc = fn
 }
 
 // SetDirty sets the internal dirty flag. When dirty is true, the next Build
@@ -151,6 +177,11 @@ func (b *CMakeBuilder) buildCleanArgs() []string {
 // returns a BuildResult. It extracts the exit code from exec.ExitError when
 // the command fails with a non-zero exit.
 //
+// When progressFunc is set, stderr is teed via io.MultiWriter to both a buffer
+// (for BuildResult.Stderr) and an io.Pipe feeding a scanner goroutine. The
+// goroutine matches Ninja [N/M] progress lines and calls progressFunc with
+// throttling. A sync.WaitGroup ensures the goroutine exits before run returns.
+//
 // When the context is cancelled or times out, the command receives SIGTERM
 // first (via cmd.Cancel). If the process does not exit within 3 seconds,
 // Go sends SIGKILL automatically (via cmd.WaitDelay). The returned
@@ -160,7 +191,20 @@ func (b *CMakeBuilder) run(ctx context.Context, name string, args []string) (*Bu
 
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+
+	var wg sync.WaitGroup
+	var pipeW *io.PipeWriter
+
+	if b.progressFunc != nil {
+		var pipeR *io.PipeReader
+		pipeR, pipeW = io.Pipe()
+		cmd.Stderr = io.MultiWriter(&stderr, pipeW)
+
+		wg.Add(1)
+		go b.scanProgress(pipeR, &wg)
+	} else {
+		cmd.Stderr = &stderr
+	}
 
 	// Graceful shutdown: send SIGTERM on context cancellation, then SIGKILL
 	// after WaitDelay if the process has not exited.
@@ -172,6 +216,16 @@ func (b *CMakeBuilder) run(ctx context.Context, name string, args []string) (*Bu
 	start := time.Now()
 	err := cmd.Run()
 	duration := time.Since(start)
+
+	// Close the pipe writer after cmd.Run returns (process exited, all internal
+	// I/O goroutines done). This causes the scanner goroutine to see EOF.
+	if pipeW != nil {
+		pipeW.Close()
+	}
+	// Wait for the scanner goroutine to finish before returning, ensuring no
+	// data race between the goroutine calling progressFunc and the caller's
+	// deferred SetProgressFunc(nil).
+	wg.Wait()
 
 	killed := false
 	if err != nil && ctx.Err() != nil {
@@ -208,4 +262,48 @@ func (b *CMakeBuilder) run(ctx context.Context, name string, args []string) (*Bu
 		Stderr:   stderr.String(),
 		Duration: duration,
 	}, nil
+}
+
+// scanProgress reads lines from r, matches Ninja [N/M] progress lines, and
+// calls b.progressFunc with throttling. It is run in a goroutine by run().
+//
+// On panic: recovers, logs, and continues draining the pipe until EOF. This
+// ensures io.MultiWriter never sees ErrClosedPipe from a prematurely closed
+// pipe reader.
+func (b *CMakeBuilder) scanProgress(r io.Reader, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("progress scanner panic", "panic", p)
+			// Drain remaining pipe data to avoid blocking io.MultiWriter.
+			// The outer loop has unwound, so we drain here directly.
+			io.Copy(io.Discard, r)
+		}
+	}()
+
+	scanner := bufio.NewScanner(r)
+	// Zero value means the first matching line is always delivered regardless
+	// of throttle, since any real time minus time.Time{} exceeds any interval.
+	lastNotify := time.Time{}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		m := ninjaProgressRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		current, err1 := strconv.Atoi(m[1])
+		total, err2 := strconv.Atoi(m[2])
+		if err1 != nil || err2 != nil {
+			continue
+		}
+
+		now := time.Now()
+		// Final line (N == M) is always sent, regardless of throttle.
+		if current == total || now.Sub(lastNotify) >= b.progressMinInterval {
+			b.progressFunc(current, total, line)
+			lastNotify = now
+		}
+	}
 }

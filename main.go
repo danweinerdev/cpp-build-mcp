@@ -27,6 +27,12 @@ type mcpServer struct {
 	registry *configRegistry
 }
 
+// progressSetter is an optional interface for builders that support progress
+// notifications. CMakeBuilder implements this; MakeBuilder and test fakes do not.
+type progressSetter interface {
+	SetProgressFunc(builder.ProgressFunc)
+}
+
 // resolveConfig extracts the optional "config" parameter from a tool request
 // and returns the corresponding configInstance. If no config parameter is
 // provided, the default instance is returned.
@@ -285,6 +291,36 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 	// Check if build can start (validates configured state and no build in progress).
 	if err := inst.store.StartBuild(); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// Set up progress notifications if the client provided a progressToken.
+	// This must happen AFTER StartBuild succeeds — if StartBuild fails,
+	// SetProgressFunc is never called and the defer never runs.
+	var progressToken any
+	if req.Params.Meta != nil {
+		progressToken = req.Params.Meta.ProgressToken
+	}
+	mcpSrv := server.ServerFromContext(ctx)
+	if progressToken != nil && mcpSrv != nil {
+		if ps, ok := inst.builder.(progressSetter); ok {
+			configName := inst.name
+			multiConfig := srv.registry.len() > 1
+			ps.SetProgressFunc(func(current, total int, line string) {
+				msg := line
+				if multiConfig {
+					msg = "[" + configName + "] " + line
+				}
+				if err := mcpSrv.SendNotificationToClient(ctx, "notifications/progress", map[string]any{
+					"progressToken": progressToken,
+					"progress":      float64(current),
+					"total":         float64(total),
+					"message":       msg,
+				}); err != nil {
+					slog.Debug("progress notification failed", "error", err)
+				}
+			})
+			defer ps.SetProgressFunc(nil)
+		}
 	}
 
 	// If the state is dirty, set the builder's dirty flag so it cleans first.

@@ -2,6 +2,7 @@ package builder
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -379,6 +380,290 @@ func TestBuildCleanArgs(t *testing.T) {
 
 	assertContainsSequence(t, args, "--build", "build")
 	assertContainsSequence(t, args, "--target", "clean")
+}
+
+// ---------------------------------------------------------------------------
+// Progress notification tests — uses shell scripts, no cmake required
+// ---------------------------------------------------------------------------
+
+func TestRunWithProgressCallback(t *testing.T) {
+	cfg := &config.Config{
+		SourceDir:    ".",
+		BuildDir:     "build",
+		BuildTimeout: 5 * time.Minute,
+	}
+
+	t.Run("callback receives correct current and total", func(t *testing.T) {
+		b := NewCMakeBuilder(cfg)
+		b.progressMinInterval = 0 // no throttle
+
+		type progressEvent struct {
+			current, total int
+			message        string
+		}
+		var events []progressEvent
+
+		b.SetProgressFunc(func(current, total int, message string) {
+			events = append(events, progressEvent{current, total, message})
+		})
+
+		// Shell script writes Ninja-style progress to stderr
+		result, err := b.run(context.Background(), "sh", []string{"-c",
+			`echo "[1/3] Building CXX object a.cpp.o" >&2
+echo "[2/3] Building CXX object b.cpp.o" >&2
+echo "[3/3] Linking CXX executable main" >&2`})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+		if result.ExitCode != 0 {
+			t.Fatalf("expected exit code 0, got %d", result.ExitCode)
+		}
+
+		if len(events) != 3 {
+			t.Fatalf("expected 3 progress events, got %d", len(events))
+		}
+
+		// Verify each event
+		for i, want := range []progressEvent{
+			{1, 3, "[1/3] Building CXX object a.cpp.o"},
+			{2, 3, "[2/3] Building CXX object b.cpp.o"},
+			{3, 3, "[3/3] Linking CXX executable main"},
+		} {
+			if events[i].current != want.current || events[i].total != want.total {
+				t.Errorf("event[%d]: got (%d, %d), want (%d, %d)", i, events[i].current, events[i].total, want.current, want.total)
+			}
+			if events[i].message != want.message {
+				t.Errorf("event[%d]: got message %q, want %q", i, events[i].message, want.message)
+			}
+		}
+	})
+
+	t.Run("no callback when progressFunc is nil", func(t *testing.T) {
+		b := NewCMakeBuilder(cfg)
+		// progressFunc is nil by default
+
+		result, err := b.run(context.Background(), "sh", []string{"-c",
+			`echo "[1/3] Building CXX object a.cpp.o" >&2`})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+		if result.ExitCode != 0 {
+			t.Fatalf("expected exit code 0, got %d", result.ExitCode)
+		}
+		// If we get here without panic, the nil path works.
+		if !strings.Contains(result.Stderr, "[1/3]") {
+			t.Errorf("expected stderr to contain [1/3], got %q", result.Stderr)
+		}
+	})
+
+	t.Run("rate limiting reduces callback count", func(t *testing.T) {
+		b := NewCMakeBuilder(cfg)
+		b.progressMinInterval = 1 * time.Millisecond
+
+		callCount := 0
+		b.SetProgressFunc(func(current, total int, message string) {
+			callCount++
+		})
+
+		// Generate 20 rapid progress lines with no delay between them
+		script := ""
+		for i := 1; i <= 20; i++ {
+			script += fmt.Sprintf(`echo "[%d/20] Building file%d.cpp.o" >&2`+"\n", i, i)
+		}
+
+		_, err := b.run(context.Background(), "sh", []string{"-c", script})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+
+		// With 50ms throttle and rapid output, callback count should be less than 20
+		// but at least 1 (the final [20/20] is always sent)
+		if callCount >= 20 {
+			t.Errorf("expected throttle to reduce callbacks below 20, got %d", callCount)
+		}
+		if callCount < 1 {
+			t.Error("expected at least 1 callback (final line)")
+		}
+	})
+
+	t.Run("final line always delivered", func(t *testing.T) {
+		b := NewCMakeBuilder(cfg)
+		b.progressMinInterval = 1 * time.Hour // extreme throttle
+
+		var lastCurrent, lastTotal int
+		b.SetProgressFunc(func(current, total int, message string) {
+			lastCurrent = current
+			lastTotal = total
+		})
+
+		_, err := b.run(context.Background(), "sh", []string{"-c",
+			`echo "[1/5] Building a.cpp.o" >&2
+echo "[5/5] Linking main" >&2`})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+
+		// The first line [1/5] is always sent (first event, lastNotify is zero).
+		// The final line [5/5] should always be sent despite the extreme throttle.
+		if lastCurrent != 5 || lastTotal != 5 {
+			t.Errorf("expected final event (5, 5), got (%d, %d)", lastCurrent, lastTotal)
+		}
+	})
+
+	t.Run("malformed lines produce no callback", func(t *testing.T) {
+		b := NewCMakeBuilder(cfg)
+		b.progressMinInterval = 0
+
+		callCount := 0
+		b.SetProgressFunc(func(current, total int, message string) {
+			callCount++
+		})
+
+		_, err := b.run(context.Background(), "sh", []string{"-c",
+			`echo "some random output" >&2
+echo "[abc/def] not a number" >&2
+echo "-- Configuring done" >&2
+echo "[2/5] Valid line" >&2`})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+
+		// Only the "[2/5] Valid line" should trigger the callback
+		if callCount != 1 {
+			t.Errorf("expected 1 callback, got %d", callCount)
+		}
+	})
+
+	t.Run("stderr integrity with progress enabled", func(t *testing.T) {
+		b := NewCMakeBuilder(cfg)
+		b.progressMinInterval = 0
+
+		b.SetProgressFunc(func(current, total int, message string) {
+			// consume but don't care
+		})
+
+		result, err := b.run(context.Background(), "sh", []string{"-c",
+			`echo "[1/3] Building a.cpp.o" >&2
+echo "some warning text" >&2
+echo "[2/3] Building b.cpp.o" >&2
+echo "[3/3] Linking main" >&2`})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+
+		// BuildResult.Stderr must contain ALL lines, including [N/M] lines
+		if !strings.Contains(result.Stderr, "[1/3] Building a.cpp.o") {
+			t.Error("stderr missing [1/3] line")
+		}
+		if !strings.Contains(result.Stderr, "some warning text") {
+			t.Error("stderr missing warning text line")
+		}
+		if !strings.Contains(result.Stderr, "[3/3] Linking main") {
+			t.Error("stderr missing [3/3] line")
+		}
+	})
+
+	t.Run("stdout is unaffected by progress", func(t *testing.T) {
+		b := NewCMakeBuilder(cfg)
+		b.progressMinInterval = 0
+
+		b.SetProgressFunc(func(current, total int, message string) {})
+
+		result, err := b.run(context.Background(), "sh", []string{"-c",
+			`echo "stdout content"
+echo "[1/1] Building" >&2`})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+
+		if !strings.Contains(result.Stdout, "stdout content") {
+			t.Errorf("expected stdout to contain 'stdout content', got %q", result.Stdout)
+		}
+	})
+
+	t.Run("panic in callback does not deadlock", func(t *testing.T) {
+		b := NewCMakeBuilder(cfg)
+		b.progressMinInterval = 0
+
+		b.SetProgressFunc(func(current, total int, message string) {
+			panic("test panic in progress callback")
+		})
+
+		// Script emits several lines — the callback panics on the first one,
+		// but run() must still return normally with complete stderr.
+		result, err := b.run(context.Background(), "sh", []string{"-c",
+			`echo "[1/3] Building a.cpp.o" >&2
+echo "[2/3] Building b.cpp.o" >&2
+echo "[3/3] Linking main" >&2`})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+		if result.ExitCode != 0 {
+			t.Fatalf("expected exit code 0, got %d", result.ExitCode)
+		}
+		// Stderr must still contain all output despite the panic
+		if !strings.Contains(result.Stderr, "[1/3]") {
+			t.Error("stderr missing [1/3] line after panic")
+		}
+		if !strings.Contains(result.Stderr, "[3/3]") {
+			t.Error("stderr missing [3/3] line after panic")
+		}
+	})
+
+	t.Run("non-zero exit code with progress", func(t *testing.T) {
+		b := NewCMakeBuilder(cfg)
+		b.progressMinInterval = 0
+
+		var events []int
+		b.SetProgressFunc(func(current, total int, message string) {
+			events = append(events, current)
+		})
+
+		result, err := b.run(context.Background(), "sh", []string{"-c",
+			`echo "[1/3] Building a.cpp.o" >&2
+echo "[2/3] Building b.cpp.o" >&2
+exit 1`})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+
+		if result.ExitCode != 1 {
+			t.Errorf("expected exit code 1, got %d", result.ExitCode)
+		}
+		if len(events) != 2 {
+			t.Errorf("expected 2 progress events before failure, got %d", len(events))
+		}
+	})
+}
+
+func TestSetProgressFunc(t *testing.T) {
+	cfg := &config.Config{BuildTimeout: time.Minute}
+	b := NewCMakeBuilder(cfg)
+
+	// Default is nil
+	if b.progressFunc != nil {
+		t.Fatal("expected progressFunc to be nil by default")
+	}
+
+	// Set a callback
+	b.SetProgressFunc(func(current, total int, message string) {})
+	if b.progressFunc == nil {
+		t.Fatal("expected progressFunc to be set")
+	}
+
+	// Clear it
+	b.SetProgressFunc(nil)
+	if b.progressFunc != nil {
+		t.Fatal("expected progressFunc to be nil after clear")
+	}
+}
+
+func TestProgressMinIntervalDefault(t *testing.T) {
+	cfg := &config.Config{BuildTimeout: time.Minute}
+	b := NewCMakeBuilder(cfg)
+	if b.progressMinInterval != 250*time.Millisecond {
+		t.Errorf("expected default progressMinInterval of 250ms, got %v", b.progressMinInterval)
+	}
 }
 
 // ---------------------------------------------------------------------------
