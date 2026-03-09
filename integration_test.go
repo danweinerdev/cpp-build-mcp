@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danweinerdev/cpp-build-mcp/builder"
+	"github.com/danweinerdev/cpp-build-mcp/config"
 	"github.com/danweinerdev/cpp-build-mcp/diagnostics"
 )
 
@@ -188,5 +191,147 @@ func collectProgress(t *testing.T) (builder.ProgressFunc, *[]progressEvent) {
 		})
 	}
 	return fn, events
+}
+
+func TestIntegrationSmoke(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	for _, tc := range toolchainCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			srcDir := copyFixture(t, "cmake")
+			buildDir := filepath.Join(srcDir, "build")
+
+			cfg := &config.Config{
+				SourceDir:             srcDir,
+				BuildDir:              buildDir,
+				Toolchain:             tc.toolchain,
+				Generator:             "ninja",
+				InjectDiagnosticFlags: false,
+				BuildTimeout:          2 * time.Minute,
+			}
+			b := builder.NewCMakeBuilder(cfg)
+			ctx := context.Background()
+
+			t.Run("configure", func(t *testing.T) {
+				result, err := b.Configure(ctx, nil)
+				if err != nil {
+					t.Fatalf("Configure returned error: %v", err)
+				}
+				if result.ExitCode != 0 {
+					t.Fatalf("Configure exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+				}
+				if result.Duration <= 0 {
+					t.Errorf("Configure duration should be > 0, got %v", result.Duration)
+				}
+			})
+
+			t.Run("build", func(t *testing.T) {
+				result, err := b.Build(ctx, nil, 0)
+				if err != nil {
+					t.Fatalf("Build returned error: %v", err)
+				}
+				if result.ExitCode != 0 {
+					t.Fatalf("Build exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+				}
+				if _, err := os.Stat(filepath.Join(buildDir, "compile_commands.json")); err != nil {
+					t.Errorf("compile_commands.json not found: %v", err)
+				}
+			})
+
+			t.Run("clean", func(t *testing.T) {
+				result, err := b.Clean(ctx, nil)
+				if err != nil {
+					t.Fatalf("Clean returned error: %v", err)
+				}
+				if result.ExitCode != 0 {
+					t.Fatalf("Clean exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+				}
+			})
+		})
+	}
+}
+
+func TestIntegrationDiagnosticInjection(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	for _, tc := range toolchainCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			srcDir := copyFixture(t, "cmake")
+			buildDir := filepath.Join(srcDir, "build")
+
+			cfg := &config.Config{
+				SourceDir:             srcDir,
+				BuildDir:              buildDir,
+				Toolchain:             tc.toolchain,
+				Generator:             "ninja",
+				InjectDiagnosticFlags: true,
+				BuildTimeout:          2 * time.Minute,
+			}
+			b := builder.NewCMakeBuilder(cfg)
+			ctx := context.Background()
+
+			// Force CMake to use the specific compiler so the diagnostic
+			// format detection matches the toolchain expectation (e.g. clang
+			// produces sarif, gcc produces json). Derive the C compiler path
+			// from the C++ compiler path (clang++→clang, g++→gcc).
+			cxxCompiler := tc.compiler
+			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
+			if tc.toolchain == "gcc" {
+				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
+			}
+			extraArgs := []string{
+				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_C_COMPILER=" + cCompiler,
+			}
+
+			// Configure with diagnostic injection enabled.
+			result, err := b.Configure(ctx, extraArgs)
+			if err != nil {
+				t.Fatalf("Configure returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Configure exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+			}
+
+			// Assert DiagnosticFormat.cmake exists.
+			moduleFile := filepath.Join(buildDir, ".cpp-build-mcp", "DiagnosticFormat.cmake")
+			if _, err := os.Stat(moduleFile); err != nil {
+				t.Fatalf("DiagnosticFormat.cmake not found at %s", moduleFile)
+			}
+
+			// Assert configure output contains diagnostic format message.
+			// CMake message(STATUS ...) goes to stdout; errors go to stderr.
+			// Check both to be resilient to CMake version differences.
+			configureOutput := result.Stdout + result.Stderr
+			if !strings.Contains(configureOutput, "[cpp-build-mcp] Diagnostic format:") {
+				t.Errorf("configure output missing diagnostic format message")
+			}
+			t.Logf("configure stdout:\n%s", result.Stdout)
+			t.Logf("configure stderr:\n%s", result.Stderr)
+
+			// Assert format type per toolchain.
+			switch tc.toolchain {
+			case "gcc":
+				if !strings.Contains(configureOutput, "json") {
+					t.Errorf("GCC diagnostic format should be json, output:\n%s", configureOutput)
+				}
+			case "clang":
+				if !strings.Contains(configureOutput, "sarif") {
+					t.Errorf("Clang diagnostic format should be sarif, output:\n%s", configureOutput)
+				}
+			}
+
+			// Build after injection — proves injected flags don't break compilation.
+			result, err = b.Build(ctx, nil, 0)
+			if err != nil {
+				t.Fatalf("Build returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Build exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+			}
+		})
+	}
 }
 
