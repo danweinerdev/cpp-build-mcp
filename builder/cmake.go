@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"sync"
@@ -17,6 +20,9 @@ import (
 
 	"github.com/danweinerdev/cpp-build-mcp/config"
 )
+
+//go:embed diagnostic_format.cmake
+var diagnosticFormatCMake string
 
 // ProgressFunc is called with build progress updates. current and total
 // correspond to Ninja's [current/total] progress line. message is the
@@ -32,6 +38,7 @@ var ninjaProgressRe = regexp.MustCompile(`^\[(\d+)/(\d+)\]`)
 type CMakeBuilder struct {
 	cfg                 *config.Config
 	dirty               bool
+	moduleWritten       bool
 	progressFunc        ProgressFunc
 	progressMinInterval time.Duration
 }
@@ -59,9 +66,59 @@ func (b *CMakeBuilder) SetDirty(dirty bool) {
 
 // Configure runs cmake to generate the build system. Any extraArgs are
 // appended after the configured CMakeArgs.
+//
+// When InjectDiagnosticFlags is true, Configure writes the embedded
+// DiagnosticFormat.cmake module into the build directory and passes it
+// via -DCMAKE_PROJECT_INCLUDE so CMake probes the active compiler for
+// structured diagnostic support at configure time.
 func (b *CMakeBuilder) Configure(ctx context.Context, extraArgs []string) (*BuildResult, error) {
+	b.moduleWritten = false
+	if b.cfg.InjectDiagnosticFlags {
+		if err := b.writeDiagnosticModule(); err != nil {
+			slog.Warn("failed to write diagnostic format module", "error", err)
+			// Non-fatal: configure will proceed without diagnostic flags.
+			// moduleWritten stays false, so buildConfigureArgs won't reference
+			// the missing file.
+		} else {
+			b.moduleWritten = true
+		}
+	}
 	args := b.buildConfigureArgs(extraArgs)
 	return b.run(ctx, "cmake", args)
+}
+
+// writeDiagnosticModule writes the embedded DiagnosticFormat.cmake to
+// <buildDir>/.cpp-build-mcp/DiagnosticFormat.cmake so it can be included
+// via CMAKE_PROJECT_INCLUDE during configure. The build directory tree is
+// created if it does not yet exist (preset-derived build dirs often don't
+// exist before the first configure).
+func (b *CMakeBuilder) writeDiagnosticModule() error {
+	dir := filepath.Join(b.cfg.BuildDir, ".cpp-build-mcp")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating diagnostic module directory %s: %w", dir, err)
+	}
+	dest := filepath.Join(dir, "DiagnosticFormat.cmake")
+	if err := os.WriteFile(dest, []byte(diagnosticFormatCMake), 0o644); err != nil {
+		return fmt.Errorf("writing diagnostic module %s: %w", dest, err)
+	}
+	slog.Debug("wrote diagnostic format module", "path", dest)
+	return nil
+}
+
+// diagnosticModulePath returns the absolute path to the written
+// DiagnosticFormat.cmake, or "" if the module was not successfully written
+// (injection disabled or write failed). An absolute path is required because
+// cmake resolves CMAKE_PROJECT_INCLUDE relative to the source directory, which
+// may differ from the process working directory.
+func (b *CMakeBuilder) diagnosticModulePath() string {
+	if !b.moduleWritten {
+		return ""
+	}
+	p := filepath.Join(b.cfg.BuildDir, ".cpp-build-mcp", "DiagnosticFormat.cmake")
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }
 
 // Build runs cmake --build to compile the project. If the builder is marked
@@ -129,11 +186,8 @@ func (b *CMakeBuilder) buildConfigureArgs(extraArgs []string) []string {
 		}
 	}
 
-	if b.cfg.InjectDiagnosticFlags && b.cfg.Toolchain == "clang" {
-		args = append(args,
-			"-DCMAKE_C_FLAGS=-fdiagnostics-format=json",
-			"-DCMAKE_CXX_FLAGS=-fdiagnostics-format=json",
-		)
+	if modPath := b.diagnosticModulePath(); modPath != "" {
+		args = append(args, "-DCMAKE_PROJECT_INCLUDE="+modPath)
 	}
 
 	args = append(args, b.cfg.CMakeArgs...)

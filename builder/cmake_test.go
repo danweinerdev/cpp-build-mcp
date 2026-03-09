@@ -73,6 +73,7 @@ func TestBuildConfigureArgs(t *testing.T) {
 			InjectDiagnosticFlags: true,
 		}
 		b := NewCMakeBuilder(cfg)
+		b.moduleWritten = true
 		args := b.buildConfigureArgs(nil)
 
 		assertContainsSequence(t, args, "-S", "src")
@@ -80,9 +81,8 @@ func TestBuildConfigureArgs(t *testing.T) {
 		assertContainsSequence(t, args, "-G", "Ninja")
 		assertContains(t, args, "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
 
-		// auto toolchain should NOT inject diagnostic flags
-		assertNotContains(t, args, "-DCMAKE_C_FLAGS=-fdiagnostics-format=json")
-		assertNotContains(t, args, "-DCMAKE_CXX_FLAGS=-fdiagnostics-format=json")
+		// InjectDiagnosticFlags=true → CMAKE_PROJECT_INCLUDE pointing to the module (absolute path)
+		assertContainsDiagModuleArg(t, args, "build")
 	})
 
 	t.Run("make generator produces Unix Makefiles", func(t *testing.T) {
@@ -111,7 +111,7 @@ func TestBuildConfigureArgs(t *testing.T) {
 		assertContainsSequence(t, args, "-G", "Ninja")
 	})
 
-	t.Run("clang toolchain injects diagnostic flags", func(t *testing.T) {
+	t.Run("inject enabled includes diagnostic module", func(t *testing.T) {
 		cfg := &config.Config{
 			SourceDir:             ".",
 			BuildDir:              "out",
@@ -119,13 +119,16 @@ func TestBuildConfigureArgs(t *testing.T) {
 			InjectDiagnosticFlags: true,
 		}
 		b := NewCMakeBuilder(cfg)
+		b.moduleWritten = true
 		args := b.buildConfigureArgs(nil)
 
-		assertContains(t, args, "-DCMAKE_C_FLAGS=-fdiagnostics-format=json")
-		assertContains(t, args, "-DCMAKE_CXX_FLAGS=-fdiagnostics-format=json")
+		assertContainsDiagModuleArg(t, args, "out")
+		// Hardcoded flags are no longer injected — CMake module probes the compiler.
+		assertNotContainsPrefix(t, args, "-DCMAKE_C_FLAGS=")
+		assertNotContainsPrefix(t, args, "-DCMAKE_CXX_FLAGS=")
 	})
 
-	t.Run("clang toolchain with inject disabled does not inject", func(t *testing.T) {
+	t.Run("inject disabled does not include diagnostic module", func(t *testing.T) {
 		cfg := &config.Config{
 			SourceDir:             ".",
 			BuildDir:              "out",
@@ -135,11 +138,10 @@ func TestBuildConfigureArgs(t *testing.T) {
 		b := NewCMakeBuilder(cfg)
 		args := b.buildConfigureArgs(nil)
 
-		assertNotContains(t, args, "-DCMAKE_C_FLAGS=-fdiagnostics-format=json")
-		assertNotContains(t, args, "-DCMAKE_CXX_FLAGS=-fdiagnostics-format=json")
+		assertNotContainsPrefix(t, args, "-DCMAKE_PROJECT_INCLUDE=")
 	})
 
-	t.Run("gcc toolchain does not inject diagnostic flags", func(t *testing.T) {
+	t.Run("gcc toolchain with inject enabled also includes module", func(t *testing.T) {
 		cfg := &config.Config{
 			SourceDir:             ".",
 			BuildDir:              "out",
@@ -147,10 +149,11 @@ func TestBuildConfigureArgs(t *testing.T) {
 			InjectDiagnosticFlags: true,
 		}
 		b := NewCMakeBuilder(cfg)
+		b.moduleWritten = true
 		args := b.buildConfigureArgs(nil)
 
-		assertNotContains(t, args, "-DCMAKE_C_FLAGS=-fdiagnostics-format=json")
-		assertNotContains(t, args, "-DCMAKE_CXX_FLAGS=-fdiagnostics-format=json")
+		// CMake module is now toolchain-agnostic — injected for all toolchains.
+		assertContainsDiagModuleArg(t, args, "out")
 	})
 
 	t.Run("preset mode args", func(t *testing.T) {
@@ -203,11 +206,11 @@ func TestBuildConfigureArgs(t *testing.T) {
 			InjectDiagnosticFlags: true,
 		}
 		b := NewCMakeBuilder(cfg)
+		b.moduleWritten = true
 		args := b.buildConfigureArgs(nil)
 
 		assertContainsSequence(t, args, "--preset", "debug")
-		assertContains(t, args, "-DCMAKE_C_FLAGS=-fdiagnostics-format=json")
-		assertContains(t, args, "-DCMAKE_CXX_FLAGS=-fdiagnostics-format=json")
+		assertContainsDiagModuleArg(t, args, "out/debug")
 
 		// Must NOT contain -S, -B, or -G
 		assertNotContains(t, args, "-S")
@@ -793,4 +796,35 @@ func indexOf(slice []string, value string) int {
 		}
 	}
 	return -1
+}
+
+// assertContainsDiagModuleArg checks that the args slice contains a
+// -DCMAKE_PROJECT_INCLUDE= entry pointing to <buildDir>/.cpp-build-mcp/DiagnosticFormat.cmake.
+// Since diagnosticModulePath now returns an absolute path, the expected path
+// is resolved via filepath.Abs.
+func assertContainsDiagModuleArg(t *testing.T, args []string, buildDir string) {
+	t.Helper()
+	rel := filepath.Join(buildDir, ".cpp-build-mcp", "DiagnosticFormat.cmake")
+	abs, err := filepath.Abs(rel)
+	if err != nil {
+		t.Fatalf("filepath.Abs(%q): %v", rel, err)
+	}
+	expected := "-DCMAKE_PROJECT_INCLUDE=" + abs
+	for _, a := range args {
+		if a == expected {
+			return
+		}
+	}
+	t.Errorf("expected args to contain %q, got %v", expected, args)
+}
+
+// assertNotContainsPrefix checks that no element in the slice starts with prefix.
+func assertNotContainsPrefix(t *testing.T, slice []string, prefix string) {
+	t.Helper()
+	for _, s := range slice {
+		if strings.HasPrefix(s, prefix) {
+			t.Errorf("expected no element with prefix %q, found %q", prefix, s)
+			return
+		}
+	}
 }
