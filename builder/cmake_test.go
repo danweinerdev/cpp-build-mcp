@@ -410,11 +410,11 @@ func TestRunWithProgressCallback(t *testing.T) {
 			events = append(events, progressEvent{current, total, message})
 		})
 
-		// Shell script writes Ninja-style progress to stderr
+		// Shell script writes Ninja-style progress to stdout (like real Ninja)
 		result, err := b.run(context.Background(), "sh", []string{"-c",
-			`echo "[1/3] Building CXX object a.cpp.o" >&2
-echo "[2/3] Building CXX object b.cpp.o" >&2
-echo "[3/3] Linking CXX executable main" >&2`})
+			`echo "[1/3] Building CXX object a.cpp.o"
+echo "[2/3] Building CXX object b.cpp.o"
+echo "[3/3] Linking CXX executable main"`})
 		if err != nil {
 			t.Fatalf("run() returned error: %v", err)
 		}
@@ -446,7 +446,7 @@ echo "[3/3] Linking CXX executable main" >&2`})
 		// progressFunc is nil by default
 
 		result, err := b.run(context.Background(), "sh", []string{"-c",
-			`echo "[1/3] Building CXX object a.cpp.o" >&2`})
+			`echo "[1/3] Building CXX object a.cpp.o"`})
 		if err != nil {
 			t.Fatalf("run() returned error: %v", err)
 		}
@@ -454,8 +454,8 @@ echo "[3/3] Linking CXX executable main" >&2`})
 			t.Fatalf("expected exit code 0, got %d", result.ExitCode)
 		}
 		// If we get here without panic, the nil path works.
-		if !strings.Contains(result.Stderr, "[1/3]") {
-			t.Errorf("expected stderr to contain [1/3], got %q", result.Stderr)
+		if !strings.Contains(result.Stdout, "[1/3]") {
+			t.Errorf("expected stdout to contain [1/3], got %q", result.Stdout)
 		}
 	})
 
@@ -471,7 +471,7 @@ echo "[3/3] Linking CXX executable main" >&2`})
 		// Generate 20 rapid progress lines with no delay between them
 		script := ""
 		for i := 1; i <= 20; i++ {
-			script += fmt.Sprintf(`echo "[%d/20] Building file%d.cpp.o" >&2`+"\n", i, i)
+			script += fmt.Sprintf(`echo "[%d/20] Building file%d.cpp.o"`+"\n", i, i)
 		}
 
 		_, err := b.run(context.Background(), "sh", []string{"-c", script})
@@ -500,8 +500,8 @@ echo "[3/3] Linking CXX executable main" >&2`})
 		})
 
 		_, err := b.run(context.Background(), "sh", []string{"-c",
-			`echo "[1/5] Building a.cpp.o" >&2
-echo "[5/5] Linking main" >&2`})
+			`echo "[1/5] Building a.cpp.o"
+echo "[5/5] Linking main"`})
 		if err != nil {
 			t.Fatalf("run() returned error: %v", err)
 		}
@@ -523,10 +523,10 @@ echo "[5/5] Linking main" >&2`})
 		})
 
 		_, err := b.run(context.Background(), "sh", []string{"-c",
-			`echo "some random output" >&2
-echo "[abc/def] not a number" >&2
-echo "-- Configuring done" >&2
-echo "[2/5] Valid line" >&2`})
+			`echo "some random output"
+echo "[abc/def] not a number"
+echo "-- Configuring done"
+echo "[2/5] Valid line"`})
 		if err != nil {
 			t.Fatalf("run() returned error: %v", err)
 		}
@@ -537,7 +537,7 @@ echo "[2/5] Valid line" >&2`})
 		}
 	})
 
-	t.Run("stderr integrity with progress enabled", func(t *testing.T) {
+	t.Run("stdout integrity with progress enabled", func(t *testing.T) {
 		b := NewCMakeBuilder(cfg)
 		b.progressMinInterval = 0
 
@@ -546,41 +546,41 @@ echo "[2/5] Valid line" >&2`})
 		})
 
 		result, err := b.run(context.Background(), "sh", []string{"-c",
-			`echo "[1/3] Building a.cpp.o" >&2
-echo "some warning text" >&2
-echo "[2/3] Building b.cpp.o" >&2
-echo "[3/3] Linking main" >&2`})
+			`echo "[1/3] Building a.cpp.o"
+echo "some other output"
+echo "[2/3] Building b.cpp.o"
+echo "[3/3] Linking main"`})
 		if err != nil {
 			t.Fatalf("run() returned error: %v", err)
 		}
 
-		// BuildResult.Stderr must contain ALL lines, including [N/M] lines
-		if !strings.Contains(result.Stderr, "[1/3] Building a.cpp.o") {
-			t.Error("stderr missing [1/3] line")
+		// BuildResult.Stdout must contain ALL lines, including [N/M] lines
+		if !strings.Contains(result.Stdout, "[1/3] Building a.cpp.o") {
+			t.Error("stdout missing [1/3] line")
 		}
-		if !strings.Contains(result.Stderr, "some warning text") {
-			t.Error("stderr missing warning text line")
+		if !strings.Contains(result.Stdout, "some other output") {
+			t.Error("stdout missing other output line")
 		}
-		if !strings.Contains(result.Stderr, "[3/3] Linking main") {
-			t.Error("stderr missing [3/3] line")
+		if !strings.Contains(result.Stdout, "[3/3] Linking main") {
+			t.Error("stdout missing [3/3] line")
 		}
 	})
 
-	t.Run("stdout is unaffected by progress", func(t *testing.T) {
+	t.Run("stderr is unaffected by progress", func(t *testing.T) {
 		b := NewCMakeBuilder(cfg)
 		b.progressMinInterval = 0
 
 		b.SetProgressFunc(func(current, total int, message string) {})
 
 		result, err := b.run(context.Background(), "sh", []string{"-c",
-			`echo "stdout content"
-echo "[1/1] Building" >&2`})
+			`echo "[1/1] Building"
+echo "stderr content" >&2`})
 		if err != nil {
 			t.Fatalf("run() returned error: %v", err)
 		}
 
-		if !strings.Contains(result.Stdout, "stdout content") {
-			t.Errorf("expected stdout to contain 'stdout content', got %q", result.Stdout)
+		if !strings.Contains(result.Stderr, "stderr content") {
+			t.Errorf("expected stderr to contain 'stderr content', got %q", result.Stderr)
 		}
 	})
 
@@ -593,23 +593,23 @@ echo "[1/1] Building" >&2`})
 		})
 
 		// Script emits several lines — the callback panics on the first one,
-		// but run() must still return normally with complete stderr.
+		// but run() must still return normally with complete stdout.
 		result, err := b.run(context.Background(), "sh", []string{"-c",
-			`echo "[1/3] Building a.cpp.o" >&2
-echo "[2/3] Building b.cpp.o" >&2
-echo "[3/3] Linking main" >&2`})
+			`echo "[1/3] Building a.cpp.o"
+echo "[2/3] Building b.cpp.o"
+echo "[3/3] Linking main"`})
 		if err != nil {
 			t.Fatalf("run() returned error: %v", err)
 		}
 		if result.ExitCode != 0 {
 			t.Fatalf("expected exit code 0, got %d", result.ExitCode)
 		}
-		// Stderr must still contain all output despite the panic
-		if !strings.Contains(result.Stderr, "[1/3]") {
-			t.Error("stderr missing [1/3] line after panic")
+		// Stdout must still contain all output despite the panic
+		if !strings.Contains(result.Stdout, "[1/3]") {
+			t.Error("stdout missing [1/3] line after panic")
 		}
-		if !strings.Contains(result.Stderr, "[3/3]") {
-			t.Error("stderr missing [3/3] line after panic")
+		if !strings.Contains(result.Stdout, "[3/3]") {
+			t.Error("stdout missing [3/3] line after panic")
 		}
 	})
 
@@ -623,8 +623,8 @@ echo "[3/3] Linking main" >&2`})
 		})
 
 		result, err := b.run(context.Background(), "sh", []string{"-c",
-			`echo "[1/3] Building a.cpp.o" >&2
-echo "[2/3] Building b.cpp.o" >&2
+			`echo "[1/3] Building a.cpp.o"
+echo "[2/3] Building b.cpp.o"
 exit 1`})
 		if err != nil {
 			t.Fatalf("run() returned error: %v", err)

@@ -231,10 +231,11 @@ func (b *CMakeBuilder) buildCleanArgs() []string {
 // returns a BuildResult. It extracts the exit code from exec.ExitError when
 // the command fails with a non-zero exit.
 //
-// When progressFunc is set, stderr is teed via io.MultiWriter to both a buffer
-// (for BuildResult.Stderr) and an io.Pipe feeding a scanner goroutine. The
-// goroutine matches Ninja [N/M] progress lines and calls progressFunc with
-// throttling. A sync.WaitGroup ensures the goroutine exits before run returns.
+// When progressFunc is set, stdout is teed via io.MultiWriter to both a buffer
+// (for BuildResult.Stdout) and an io.Pipe feeding a scanner goroutine. Stdout
+// is used because Ninja writes [N/M] progress lines there. The goroutine
+// matches these lines and calls progressFunc with throttling. A sync.WaitGroup
+// ensures the goroutine exits before run returns.
 //
 // When the context is cancelled or times out, the command receives SIGTERM
 // first (via cmd.Cancel). If the process does not exit within 3 seconds,
@@ -249,15 +250,15 @@ func (b *CMakeBuilder) run(ctx context.Context, name string, args []string) (*Bu
 	var wg sync.WaitGroup
 	var pipeW *io.PipeWriter
 
+	cmd.Stderr = &stderr
+
 	if b.progressFunc != nil {
 		var pipeR *io.PipeReader
 		pipeR, pipeW = io.Pipe()
-		cmd.Stderr = io.MultiWriter(&stderr, pipeW)
+		cmd.Stdout = io.MultiWriter(&stdout, pipeW)
 
 		wg.Add(1)
 		go b.scanProgress(pipeR, &wg)
-	} else {
-		cmd.Stderr = &stderr
 	}
 
 	// Graceful shutdown: send SIGTERM on context cancellation, then SIGKILL
@@ -318,8 +319,9 @@ func (b *CMakeBuilder) run(ctx context.Context, name string, args []string) (*Bu
 	}, nil
 }
 
-// scanProgress reads lines from r, matches Ninja [N/M] progress lines, and
-// calls b.progressFunc with throttling. It is run in a goroutine by run().
+// scanProgress reads lines from r (teed from stdout, where Ninja writes its
+// [N/M] progress lines), matches them, and calls b.progressFunc with
+// throttling. It is run in a goroutine by run().
 //
 // On panic: recovers, logs, and continues draining the pipe until EOF. This
 // ensures io.MultiWriter never sees ErrClosedPipe from a prematurely closed
