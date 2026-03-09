@@ -89,16 +89,27 @@ func (b *MakeBuilder) buildCleanArgs() []string {
 	return []string{"-C", b.cfg.BuildDir, "clean"}
 }
 
+// diagnosticFlag returns the compiler flag string for structured diagnostics,
+// based on the configured toolchain. Clang uses SARIF; everything else uses JSON.
+func (b *MakeBuilder) diagnosticFlag() string {
+	switch strings.ToLower(b.cfg.Toolchain) {
+	case "clang":
+		return "-fdiagnostics-format=sarif -Wno-sarif-format-unstable"
+	default:
+		return "-fdiagnostics-format=json"
+	}
+}
+
 // buildEnv constructs the environment variable slice for a make invocation.
-// When InjectDiagnosticFlags is true, it appends -fdiagnostics-format=json
-// to CFLAGS and CXXFLAGS.
+// When InjectDiagnosticFlags is true, it appends the appropriate diagnostic
+// format flag to CFLAGS and CXXFLAGS.
 func (b *MakeBuilder) buildEnv() []string {
 	env := os.Environ()
 	if !b.cfg.InjectDiagnosticFlags {
 		return env
 	}
 
-	const diagFlag = "-fdiagnostics-format=json"
+	diagFlag := b.diagnosticFlag()
 
 	cflags := os.Getenv("CFLAGS")
 	cxxflags := os.Getenv("CXXFLAGS")

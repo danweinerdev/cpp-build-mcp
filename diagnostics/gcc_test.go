@@ -326,7 +326,7 @@ func TestGCCParser_Parse(t *testing.T) {
 		assertDiagField(t, "Source", diags[0].Source, "gcc")
 	})
 
-	t.Run("stderr is ignored", func(t *testing.T) {
+	t.Run("stderr not used when stdout has content", func(t *testing.T) {
 		stdout := `[
 			{
 				"kind": "warning",
@@ -351,9 +351,53 @@ func TestGCCParser_Parse(t *testing.T) {
 			t.Fatalf("Parse() returned error: %v", err)
 		}
 		if len(diags) != 1 {
-			t.Fatalf("expected 1 diagnostic (stderr ignored), got %d", len(diags))
+			t.Fatalf("expected 1 diagnostic (stdout wins), got %d", len(diags))
 		}
 		assertDiagField(t, "Message", diags[0].Message, "from stdout")
+	})
+
+	t.Run("JSON on stderr with empty stdout", func(t *testing.T) {
+		stderr := `[
+			{
+				"kind": "warning",
+				"message": "unused variable 'x'",
+				"option": "-Wunused-variable",
+				"locations": [{"caret": {"file": "main.cpp", "line": 7, "column": 9}}],
+				"children": []
+			}
+		]`
+
+		diags, err := parser.Parse("", stderr)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic from stderr fallback, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "unused variable 'x'")
+		assertDiagSeverity(t, diags[0].Severity, SeverityWarning)
+		assertDiagField(t, "Code", diags[0].Code, "-Wunused-variable")
+	})
+
+	t.Run("JSON on stderr with whitespace-only stdout", func(t *testing.T) {
+		stderr := `[
+			{
+				"kind": "error",
+				"message": "missing semicolon",
+				"option": "",
+				"locations": [{"caret": {"file": "a.cpp", "line": 1, "column": 1}}],
+				"children": []
+			}
+		]`
+
+		diags, err := parser.Parse("   \n\t  ", stderr)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic from stderr fallback, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "missing semicolon")
 	})
 
 	t.Run("multiple children on same parent", func(t *testing.T) {

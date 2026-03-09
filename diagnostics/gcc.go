@@ -15,10 +15,11 @@ const maxChildDepth = 3
 // GCCParser parses GCC's JSON diagnostic output (GCC 10+ with
 // -fdiagnostics-format=json) into structured Diagnostics.
 //
-// GCC writes JSON diagnostics to stdout as a JSON array. Like Clang,
-// when Ninja runs multiple translation units in parallel their stdout
-// streams may be concatenated, producing multiple adjacent arrays.
-// GCCParser reuses splitJSONArrays to handle this.
+// GCC writes JSON diagnostics as a JSON array. GCC 15+ writes to stderr;
+// older versions may write to stdout. The parser checks stdout first and
+// falls back to stderr. When Ninja runs multiple translation units in
+// parallel their output may be concatenated; GCCParser reuses
+// splitJSONArrays to handle this.
 type GCCParser struct{}
 
 // gccLocation represents the caret/start/finish location within a GCC
@@ -44,22 +45,26 @@ type gccDiagnostic struct {
 	Children  []gccDiagnostic    `json:"children"`
 }
 
-// Parse parses GCC JSON diagnostic output from stdout into []Diagnostic.
-// The stderr parameter is ignored because GCC writes JSON diagnostics to stdout.
+// Parse parses GCC JSON diagnostic output into []Diagnostic.
+// Stdout is checked first; if empty after trimming, stderr is used as a
+// fallback (GCC 15+ writes JSON diagnostics to stderr).
 func (p *GCCParser) Parse(stdout, stderr string) ([]Diagnostic, error) {
-	stdout = strings.TrimSpace(stdout)
-	if stdout == "" {
+	input := strings.TrimSpace(stdout)
+	if input == "" {
+		input = strings.TrimSpace(stderr)
+	}
+	if input == "" {
 		return nil, nil
 	}
 
-	chunks := splitJSONArrays(stdout)
+	chunks := splitJSONArrays(input)
 
 	var result []Diagnostic
 	for _, chunk := range chunks {
 		var raw []gccDiagnostic
 		if err := json.Unmarshal([]byte(chunk), &raw); err != nil {
 			slog.Warn("failed to parse GCC JSON diagnostics", "error", err)
-			truncated := truncateOutput(stdout, 200)
+			truncated := truncateOutput(input, 200)
 			return []Diagnostic{
 				{
 					Severity: SeverityError,

@@ -13,12 +13,15 @@ import (
 // parsing Clang JSON diagnostics.
 var ninjaProgressRe = regexp.MustCompile(`(?m)^\[\d+/\d+\].*$`)
 
-// ClangParser parses Clang's JSON diagnostic output into structured Diagnostics.
+// ClangParser parses Clang diagnostic output into structured Diagnostics.
 //
-// Clang writes JSON diagnostics to stdout as a JSON array. When Ninja runs
-// multiple translation units in parallel, their stdout streams may be
-// concatenated, producing multiple adjacent arrays (e.g., "[...][...]").
-// ClangParser handles this by splitting on array boundaries before parsing.
+// ClangParser auto-detects two formats: SARIF 2.1.0 (from
+// -fdiagnostics-format=sarif, JSON object '{...}') and native Clang JSON
+// (JSON array '[...]'). Stdout is checked first; if it has no structured
+// content after stripping Ninja progress lines, stderr is used as a
+// fallback. When Ninja runs multiple translation units in parallel, their
+// output streams may be concatenated; ClangParser splits on object/array
+// boundaries before parsing.
 type ClangParser struct{}
 
 // clangDiagnostic represents a single diagnostic entry in Clang's JSON output.
@@ -31,27 +34,43 @@ type clangDiagnostic struct {
 	Option   string `json:"option"`
 }
 
-// Parse parses Clang JSON diagnostic output from stdout into []Diagnostic.
-// The stderr parameter is ignored because Clang writes JSON diagnostics to stdout.
+// Parse parses Clang diagnostic output from stdout/stderr into []Diagnostic.
+// It auto-detects the format: '{' → SARIF (from -fdiagnostics-format=sarif),
+// '[' → native Clang JSON. Stdout is checked first; if it has no structured
+// content after stripping Ninja progress lines, stderr is used as a fallback.
 func (p *ClangParser) Parse(stdout, stderr string) ([]Diagnostic, error) {
-	// Strip Ninja progress lines before JSON parsing. When Ninja is the
-	// generator, stdout contains interleaved progress lines ([1/803] Building ...)
-	// and Clang JSON arrays. The progress lines contain brackets that confuse
-	// splitJSONArrays and produce unparseable chunks.
+	// Strip Ninja progress lines from both streams before format detection.
 	stdout = ninjaProgressRe.ReplaceAllString(stdout, "")
-	stdout = strings.TrimSpace(stdout)
-	if stdout == "" {
+	stderr = ninjaProgressRe.ReplaceAllString(stderr, "")
+
+	// Select stream: stdout first, stderr fallback.
+	var input string
+	if hasStructuredContent(stdout) {
+		input = strings.TrimSpace(stdout)
+	} else if hasStructuredContent(stderr) {
+		input = strings.TrimSpace(stderr)
+	}
+	if input == "" {
 		return nil, nil
 	}
 
-	chunks := splitJSONArrays(stdout)
+	// Detect format and dispatch.
+	if detectOutputFormat(input) == "sarif" {
+		return parseSARIF(input)
+	}
+	return p.parseClangJSON(input)
+}
+
+// parseClangJSON handles the native Clang JSON array format ([...]).
+func (p *ClangParser) parseClangJSON(input string) ([]Diagnostic, error) {
+	chunks := splitJSONArrays(input)
 
 	var result []Diagnostic
 	for _, chunk := range chunks {
 		var raw []clangDiagnostic
 		if err := json.Unmarshal([]byte(chunk), &raw); err != nil {
 			slog.Warn("failed to parse Clang JSON diagnostics", "error", err)
-			truncated := truncateOutput(stdout, 200)
+			truncated := truncateOutput(input, 200)
 			return []Diagnostic{
 				{
 					Severity: SeverityError,
@@ -74,6 +93,33 @@ func (p *ClangParser) Parse(stdout, stderr string) ([]Diagnostic, error) {
 	}
 
 	return result, nil
+}
+
+// hasStructuredContent reports whether s contains structured JSON content
+// (first non-whitespace character is '{' or '[').
+func hasStructuredContent(s string) bool {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return false
+	}
+	return trimmed[0] == '{' || trimmed[0] == '['
+}
+
+// detectOutputFormat returns "sarif" if the first non-whitespace character is '{',
+// "clang-json" if it's '[', or "" otherwise.
+func detectOutputFormat(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return ""
+	}
+	switch trimmed[0] {
+	case '{':
+		return "sarif"
+	case '[':
+		return "clang-json"
+	default:
+		return ""
+	}
 }
 
 // splitJSONArrays splits a string that may contain multiple concatenated JSON

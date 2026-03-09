@@ -353,7 +353,7 @@ func TestClangParser_Parse(t *testing.T) {
 		assertDiagSeverity(t, diags[1].Severity, SeverityError)
 	})
 
-	t.Run("stderr is ignored", func(t *testing.T) {
+	t.Run("stderr not used when stdout has content", func(t *testing.T) {
 		stdout := `[
 			{
 				"file": "test.cpp",
@@ -384,9 +384,109 @@ func TestClangParser_Parse(t *testing.T) {
 			t.Fatalf("Parse() returned error: %v", err)
 		}
 		if len(diags) != 1 {
-			t.Fatalf("expected 1 diagnostic (stderr ignored), got %d", len(diags))
+			t.Fatalf("expected 1 diagnostic (stdout wins), got %d", len(diags))
 		}
 		assertDiagField(t, "Message", diags[0].Message, "from stdout")
+	})
+
+	t.Run("SARIF on stdout parsed correctly", func(t *testing.T) {
+		sarif := `{"runs":[{"results":[{
+			"level":"warning",
+			"message":{"text":"unused variable 'x'"},
+			"ruleId":"7538",
+			"locations":[{"physicalLocation":{
+				"artifactLocation":{"uri":"file:///src/test.cpp"},
+				"region":{"startLine":5,"startColumn":9}
+			}}]
+		}]}]}`
+
+		diags, err := parser.Parse(sarif, "")
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		d := diags[0]
+		assertDiagField(t, "File", d.File, "/src/test.cpp")
+		assertDiagInt(t, "Line", d.Line, 5)
+		assertDiagInt(t, "Column", d.Column, 9)
+		assertDiagSeverity(t, d.Severity, SeverityWarning)
+		assertDiagField(t, "Message", d.Message, "unused variable 'x'")
+		assertDiagField(t, "Code", d.Code, "7538")
+		assertDiagField(t, "Source", d.Source, "clang")
+	})
+
+	t.Run("SARIF on stderr with empty stdout", func(t *testing.T) {
+		sarif := `{"runs":[{"results":[{
+			"level":"error",
+			"message":{"text":"use of undeclared identifier 'foo'"},
+			"ruleId":"5350",
+			"locations":[{"physicalLocation":{
+				"artifactLocation":{"uri":"file:///src/main.cpp"},
+				"region":{"startLine":10,"startColumn":5}
+			}}]
+		}]}]}`
+
+		diags, err := parser.Parse("", sarif)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic from stderr fallback, got %d", len(diags))
+		}
+		d := diags[0]
+		assertDiagField(t, "File", d.File, "/src/main.cpp")
+		assertDiagSeverity(t, d.Severity, SeverityError)
+		assertDiagField(t, "Message", d.Message, "use of undeclared identifier 'foo'")
+	})
+
+	t.Run("real Clang stderr format with leading blank and trailing summary", func(t *testing.T) {
+		sarif := `{"runs":[{"results":[{
+			"level":"warning",
+			"message":{"text":"unused variable 'x'"},
+			"ruleId":"7538",
+			"locations":[]
+		}]}]}`
+		stderr := "\n" + sarif + "\n\n1 warning generated.\n"
+
+		diags, err := parser.Parse("", stderr)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "unused variable 'x'")
+	})
+
+	t.Run("ninja progress stripped from stderr before SARIF", func(t *testing.T) {
+		sarif := `{"runs":[{"results":[{
+			"level":"warning",
+			"message":{"text":"w1"},
+			"ruleId":"",
+			"locations":[]
+		}]}]}`
+		stderr := "[1/5] Building CXX object a.cpp.o\n" + sarif
+
+		diags, err := parser.Parse("", stderr)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "w1")
+	})
+
+	t.Run("neither stream has structured content returns nil", func(t *testing.T) {
+		diags, err := parser.Parse("some text", "error: something")
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if diags != nil {
+			t.Fatalf("expected nil, got %v", diags)
+		}
 	})
 }
 

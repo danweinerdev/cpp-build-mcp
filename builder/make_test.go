@@ -121,7 +121,43 @@ func TestMakeBuilderBuildArgsWithDirty(t *testing.T) {
 }
 
 func TestMakeBuilderEnvInjection(t *testing.T) {
-	t.Run("injects CFLAGS and CXXFLAGS when enabled", func(t *testing.T) {
+	t.Run("gcc toolchain injects json flag", func(t *testing.T) {
+		cfg := &config.Config{
+			BuildDir:              "build",
+			BuildTimeout:          5 * time.Minute,
+			Toolchain:             "gcc",
+			InjectDiagnosticFlags: true,
+		}
+		b := NewMakeBuilder(cfg)
+
+		os.Unsetenv("CFLAGS")
+		os.Unsetenv("CXXFLAGS")
+
+		env := b.buildEnv()
+
+		assertEnvContains(t, env, "CFLAGS", "-fdiagnostics-format=json")
+		assertEnvContains(t, env, "CXXFLAGS", "-fdiagnostics-format=json")
+	})
+
+	t.Run("clang toolchain injects sarif flag", func(t *testing.T) {
+		cfg := &config.Config{
+			BuildDir:              "build",
+			BuildTimeout:          5 * time.Minute,
+			Toolchain:             "clang",
+			InjectDiagnosticFlags: true,
+		}
+		b := NewMakeBuilder(cfg)
+
+		os.Unsetenv("CFLAGS")
+		os.Unsetenv("CXXFLAGS")
+
+		env := b.buildEnv()
+
+		assertEnvContains(t, env, "CFLAGS", "-fdiagnostics-format=sarif -Wno-sarif-format-unstable")
+		assertEnvContains(t, env, "CXXFLAGS", "-fdiagnostics-format=sarif -Wno-sarif-format-unstable")
+	})
+
+	t.Run("empty toolchain defaults to json flag", func(t *testing.T) {
 		cfg := &config.Config{
 			BuildDir:              "build",
 			BuildTimeout:          5 * time.Minute,
@@ -129,7 +165,6 @@ func TestMakeBuilderEnvInjection(t *testing.T) {
 		}
 		b := NewMakeBuilder(cfg)
 
-		// Clear any pre-existing CFLAGS/CXXFLAGS to get predictable results.
 		os.Unsetenv("CFLAGS")
 		os.Unsetenv("CXXFLAGS")
 
@@ -143,6 +178,7 @@ func TestMakeBuilderEnvInjection(t *testing.T) {
 		cfg := &config.Config{
 			BuildDir:              "build",
 			BuildTimeout:          5 * time.Minute,
+			Toolchain:             "gcc",
 			InjectDiagnosticFlags: true,
 		}
 		b := NewMakeBuilder(cfg)
