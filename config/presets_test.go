@@ -255,6 +255,34 @@ func TestReadPresetsFile(t *testing.T) {
 	})
 }
 
+func TestClassifyPresetToolchain(t *testing.T) {
+	cases := []struct {
+		name          string
+		toolchainFile string
+		presetName    string
+		want          string
+	}{
+		{"clang toolchainFile", "${sourceDir}/Build/CMake/Toolchains/clang.cmake", "debug", "clang"},
+		{"gcc toolchainFile", "/path/to/gcc.cmake", "release", "gcc"},
+		{"msvc toolchainFile", "toolchains/msvc.cmake", "win64", "msvc"},
+		{"clang in preset name", "", "clang-Debug", "clang"},
+		{"gcc in preset name", "", "gcc-Release", "gcc"},
+		{"msvc in preset name", "", "windows-msvc", "msvc"},
+		{"clang toolchainFile wins over gcc name", "toolchains/clang.cmake", "gcc-preset", "clang"},
+		{"no signal returns auto", "", "debug", "auto"},
+		{"case insensitive toolchainFile", "Toolchains/CLANG.cmake", "release", "clang"},
+		{"case insensitive preset name", "", "Clang-Asan", "clang"},
+		{"osx preset with clang toolchainFile", "${sourceDir}/Build/CMake/Toolchains/clang.cmake", "osx-Debug", "clang"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyPresetToolchain(tc.toolchainFile, tc.presetName)
+			assertEqual(t, "toolchain", got, tc.want)
+		})
+	}
+}
+
 func TestResolveInherits(t *testing.T) {
 	t.Run("single-level inherits", func(t *testing.T) {
 		presets := []configurePreset{
@@ -379,6 +407,34 @@ func TestResolveInherits(t *testing.T) {
 
 		assertEqual(t, "standalone.BinaryDir", result[0].BinaryDir, "/build/standalone")
 		assertEqual(t, "standalone.Generator", result[0].Generator, "Ninja")
+	})
+
+	t.Run("toolchainFile inherits from parent", func(t *testing.T) {
+		presets := []configurePreset{
+			{Name: "child", BinaryDir: "/build/child", Inherits: json.RawMessage(`"parent"`)},
+			{Name: "parent", Generator: "Ninja", ToolchainFile: "${sourceDir}/Toolchains/clang.cmake"},
+		}
+
+		result, err := resolveInherits(presets)
+		if err != nil {
+			t.Fatalf("resolveInherits() returned error: %v", err)
+		}
+
+		assertEqual(t, "child.ToolchainFile", result[0].ToolchainFile, "${sourceDir}/Toolchains/clang.cmake")
+	})
+
+	t.Run("child toolchainFile overrides parent", func(t *testing.T) {
+		presets := []configurePreset{
+			{Name: "child", BinaryDir: "/build/child", ToolchainFile: "gcc.cmake", Inherits: json.RawMessage(`"parent"`)},
+			{Name: "parent", Generator: "Ninja", ToolchainFile: "clang.cmake"},
+		}
+
+		result, err := resolveInherits(presets)
+		if err != nil {
+			t.Fatalf("resolveInherits() returned error: %v", err)
+		}
+
+		assertEqual(t, "child.ToolchainFile", result[0].ToolchainFile, "gcc.cmake")
 	})
 
 	t.Run("unknown parent is skipped silently", func(t *testing.T) {
@@ -1124,5 +1180,112 @@ func TestLoadPresetsMetadata(t *testing.T) {
 		assertEqual(t, "result[1].Name", result[1].Name, "release")
 		assertEqual(t, "result[1].BinaryDir", result[1].BinaryDir, filepath.Join(dir, "build/release"))
 		assertEqual(t, "result[1].Generator", result[1].Generator, "make")
+	})
+
+	t.Run("Fusion-style presets with toolchainFile inheritance", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 6,
+			"configurePresets": [
+				{
+					"name": "base",
+					"hidden": true
+				},
+				{
+					"name": "unix-base",
+					"hidden": true,
+					"inherits": "base",
+					"generator": "Ninja"
+				},
+				{
+					"name": "linux-clang-base",
+					"hidden": true,
+					"inherits": "unix-base",
+					"binaryDir": "${sourceDir}/tmp/Clang/${presetName}",
+					"toolchainFile": "${sourceDir}/Build/CMake/Toolchains/clang.cmake"
+				},
+				{
+					"name": "linux-gcc-base",
+					"hidden": true,
+					"inherits": "unix-base",
+					"binaryDir": "${sourceDir}/tmp/GCC/${presetName}",
+					"toolchainFile": "${sourceDir}/Build/CMake/Toolchains/gcc.cmake"
+				},
+				{
+					"name": "clang-Debug",
+					"inherits": "linux-clang-base",
+					"binaryDir": "${sourceDir}/tmp/Clang/Debug"
+				},
+				{
+					"name": "clang-Release",
+					"inherits": "linux-clang-base",
+					"binaryDir": "${sourceDir}/tmp/Clang/Release"
+				},
+				{
+					"name": "gcc-Debug",
+					"inherits": "linux-gcc-base",
+					"binaryDir": "${sourceDir}/tmp/GCC/Debug"
+				}
+			]
+		}`)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+
+		if len(result) != 3 {
+			t.Fatalf("got %d presets, want 3", len(result))
+		}
+
+		byName := make(map[string]presetMetadata, len(result))
+		for _, pm := range result {
+			byName[pm.Name] = pm
+		}
+
+		// Clang presets should inherit toolchainFile and classify as "clang".
+		assertEqual(t, "clang-Debug.Toolchain", byName["clang-Debug"].Toolchain, "clang")
+		assertEqual(t, "clang-Release.Toolchain", byName["clang-Release"].Toolchain, "clang")
+
+		// GCC preset should inherit toolchainFile and classify as "gcc".
+		assertEqual(t, "gcc-Debug.Toolchain", byName["gcc-Debug"].Toolchain, "gcc")
+	})
+
+	t.Run("preset name used when no toolchainFile", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "clang-debug",
+					"binaryDir": "${sourceDir}/build/clang-debug",
+					"generator": "Ninja"
+				},
+				{
+					"name": "gcc-release",
+					"binaryDir": "${sourceDir}/build/gcc-release",
+					"generator": "Ninja"
+				},
+				{
+					"name": "default",
+					"binaryDir": "${sourceDir}/build/default",
+					"generator": "Ninja"
+				}
+			]
+		}`)
+
+		result, err := loadPresetsMetadata(dir)
+		if err != nil {
+			t.Fatalf("loadPresetsMetadata() returned error: %v", err)
+		}
+
+		byName := make(map[string]presetMetadata, len(result))
+		for _, pm := range result {
+			byName[pm.Name] = pm
+		}
+
+		assertEqual(t, "clang-debug.Toolchain", byName["clang-debug"].Toolchain, "clang")
+		assertEqual(t, "gcc-release.Toolchain", byName["gcc-release"].Toolchain, "gcc")
+		assertEqual(t, "default.Toolchain", byName["default"].Toolchain, "auto")
 	})
 }

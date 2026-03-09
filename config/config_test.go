@@ -1801,6 +1801,82 @@ func TestLoadMulti_EdgeCases(t *testing.T) {
 		assertEqual(t, "Generator", cfg.Generator, "ninja")
 		assertEqual(t, "Preset", cfg.Preset, "debug")
 	})
+
+	t.Run("toolchain inferred from preset toolchainFile", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 6,
+			"configurePresets": [
+				{
+					"name": "unix-base",
+					"hidden": true,
+					"generator": "Ninja"
+				},
+				{
+					"name": "linux-clang-base",
+					"hidden": true,
+					"inherits": "unix-base",
+					"binaryDir": "${sourceDir}/tmp/Clang/${presetName}",
+					"toolchainFile": "${sourceDir}/Toolchains/clang.cmake"
+				},
+				{
+					"name": "linux-gcc-base",
+					"hidden": true,
+					"inherits": "unix-base",
+					"binaryDir": "${sourceDir}/tmp/GCC/${presetName}",
+					"toolchainFile": "${sourceDir}/Toolchains/gcc.cmake"
+				},
+				{
+					"name": "clang-Debug",
+					"inherits": "linux-clang-base",
+					"binaryDir": "${sourceDir}/tmp/Clang/Debug"
+				},
+				{
+					"name": "gcc-Debug",
+					"inherits": "linux-gcc-base",
+					"binaryDir": "${sourceDir}/tmp/GCC/Debug"
+				}
+			]
+		}`)
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		if len(configs) != 2 {
+			t.Fatalf("got %d configs, want 2", len(configs))
+		}
+
+		// Toolchain should be inferred from inherited toolchainFile.
+		assertEqual(t, "clang-Debug.Toolchain", configs["clang-Debug"].Toolchain, "clang")
+		assertEqual(t, "gcc-Debug.Toolchain", configs["gcc-Debug"].Toolchain, "gcc")
+	})
+
+	t.Run("explicit config file toolchain overrides preset-inferred toolchain", func(t *testing.T) {
+		dir := t.TempDir()
+		writePresetsFile(t, dir, "CMakePresets.json", `{
+			"version": 3,
+			"configurePresets": [
+				{
+					"name": "clang-debug",
+					"binaryDir": "${sourceDir}/build/clang-debug",
+					"generator": "Ninja",
+					"toolchainFile": "toolchains/clang.cmake"
+				}
+			]
+		}`)
+		// User explicitly overrides toolchain to gcc.
+		writeConfig(t, dir, `{"toolchain": "gcc"}`)
+
+		configs, _, err := LoadMulti(dir)
+		if err != nil {
+			t.Fatalf("LoadMulti() returned error: %v", err)
+		}
+
+		// User's explicit toolchain should win over preset-inferred.
+		assertEqual(t, "clang-debug.Toolchain", configs["clang-debug"].Toolchain, "gcc")
+	})
 }
 
 // writeConfig writes JSON content to .cpp-build-mcp.json in dir.

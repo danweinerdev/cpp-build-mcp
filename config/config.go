@@ -263,6 +263,7 @@ func buildPresetConfigs(dir string, data []byte, defaultConfig string, path stri
 		cfg.BuildDir = pm.BinaryDir
 		cfg.Generator = pm.Generator
 		cfg.Preset = pm.Name
+		cfg.Toolchain = pm.Toolchain
 		configs[pm.Name] = &cfg
 	}
 
@@ -276,6 +277,8 @@ func buildPresetConfigs(dir string, data []byte, defaultConfig string, path stri
 			}
 			// Restore preset-derived fields that may have been overridden by
 			// top-level build_dir, generator, or preset in .cpp-build-mcp.json.
+			// Toolchain is NOT restored — the user can override the
+			// preset-inferred toolchain via the config file.
 			cfg.BuildDir = pm.BinaryDir
 			cfg.Generator = pm.Generator
 			cfg.Preset = pm.Name

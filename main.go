@@ -64,10 +64,6 @@ func main() {
 			store:   state.NewStore(),
 		}
 		registry.add(inst)
-
-		// Run toolchain detection eagerly at startup so the lazy call in
-		// handleBuild finds a concrete toolchain and skips filesystem detection.
-		inst.cfg.Toolchain = resolveToolchain(inst)
 	}
 
 	srv := &mcpServer{
@@ -253,9 +249,14 @@ type diagnosticEntry struct {
 
 // resolveToolchain returns the effective toolchain string. If the configured
 // toolchain is "auto" or empty, it runs auto-detection against
-// compile_commands.json and the system compiler. When the detected toolchain
-// is "gcc-legacy" (GCC < 10 without JSON diagnostics), diagnostic flag
-// injection is disabled to prevent passing unsupported flags.
+// compile_commands.json and the system compiler. Detection is NOT cached;
+// each call re-detects when the toolchain is "auto". This ensures that
+// after configure creates compile_commands.json, the correct compiler is
+// identified — even if a pre-configure detection returned the wrong result.
+//
+// When the detected toolchain is "gcc-legacy" (GCC < 10 without JSON
+// diagnostics), diagnostic flag injection is disabled to prevent passing
+// unsupported flags.
 func resolveToolchain(inst *configInstance) string {
 	tc := inst.cfg.Toolchain
 	if tc == "auto" || tc == "" {

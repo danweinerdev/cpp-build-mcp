@@ -18,6 +18,7 @@ type presetMetadata struct {
 	Name      string
 	BinaryDir string
 	Generator string
+	Toolchain string // "clang", "gcc", "msvc", or "auto"
 }
 
 // presetsFile represents the top-level structure of a CMakePresets.json or
@@ -33,11 +34,12 @@ type presetsFile struct {
 // The Inherits field uses json.RawMessage because the CMake spec allows it to
 // be either a single string or an array of strings.
 type configurePreset struct {
-	Name      string          `json:"name"`
-	BinaryDir string          `json:"binaryDir"`
-	Generator string          `json:"generator"`
-	Hidden    bool            `json:"hidden"`
-	Inherits  json.RawMessage `json:"inherits"`
+	Name          string          `json:"name"`
+	BinaryDir     string          `json:"binaryDir"`
+	Generator     string          `json:"generator"`
+	ToolchainFile string          `json:"toolchainFile"`
+	Hidden        bool            `json:"hidden"`
+	Inherits      json.RawMessage `json:"inherits"`
 }
 
 // readPresetsFile reads and parses a CMakePresets.json (or CMakeUserPresets.json)
@@ -127,6 +129,9 @@ func resolveInherits(presets []configurePreset) ([]configurePreset, error) {
 			if presets[idx].Generator == "" {
 				presets[idx].Generator = presets[pi].Generator
 			}
+			if presets[idx].ToolchainFile == "" {
+				presets[idx].ToolchainFile = presets[pi].ToolchainFile
+			}
 		}
 
 		inStack[idx] = false
@@ -179,6 +184,43 @@ func normalizeGenerator(gen string) string {
 		return short
 	}
 	return "ninja"
+}
+
+// classifyPresetToolchain derives a toolchain name from preset metadata.
+// It checks (in priority order):
+//  1. toolchainFile path — e.g., ".../Toolchains/clang.cmake" → "clang"
+//  2. Preset name — e.g., "clang-Debug" → "clang"
+//
+// Returns "auto" if no signal is found, which falls back to runtime
+// detection via compile_commands.json.
+func classifyPresetToolchain(toolchainFile, presetName string) string {
+	// 1. Check toolchainFile (most reliable signal).
+	if toolchainFile != "" {
+		lower := strings.ToLower(toolchainFile)
+		if strings.Contains(lower, "clang") {
+			return "clang"
+		}
+		if strings.Contains(lower, "gcc") {
+			return "gcc"
+		}
+		if strings.Contains(lower, "msvc") || strings.Contains(lower, "cl.exe") {
+			return "msvc"
+		}
+	}
+
+	// 2. Check preset name.
+	lower := strings.ToLower(presetName)
+	if strings.Contains(lower, "clang") {
+		return "clang"
+	}
+	if strings.Contains(lower, "gcc") {
+		return "gcc"
+	}
+	if strings.Contains(lower, "msvc") {
+		return "msvc"
+	}
+
+	return "auto"
 }
 
 // isMultiConfigGenerator returns true if the generator is a multi-config
@@ -295,10 +337,14 @@ func loadPresetsMetadata(dir string) ([]presetMetadata, error) {
 		// 8c. Normalize generator.
 		gen := normalizeGenerator(p.Generator)
 
+		// 8d. Classify toolchain from preset metadata.
+		tc := classifyPresetToolchain(p.ToolchainFile, p.Name)
+
 		result = append(result, presetMetadata{
 			Name:      p.Name,
 			BinaryDir: bd,
 			Generator: gen,
+			Toolchain: tc,
 		})
 	}
 
