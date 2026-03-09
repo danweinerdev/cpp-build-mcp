@@ -816,3 +816,175 @@ func TestIntegrationConfigureError(t *testing.T) {
 	}
 }
 
+func TestIntegrationProgress(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	for _, tc := range toolchainCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			srcDir := copyFixture(t, "cmake-library")
+			buildDir := filepath.Join(srcDir, "build")
+
+			cfg := &config.Config{
+				SourceDir:             srcDir,
+				BuildDir:              buildDir,
+				Toolchain:             tc.toolchain,
+				Generator:             "ninja",
+				InjectDiagnosticFlags: false,
+				BuildTimeout:          2 * time.Minute,
+			}
+			b := builder.NewCMakeBuilder(cfg)
+			ctx := context.Background()
+
+			// Configure — should succeed.
+			result, err := b.Configure(ctx, nil)
+			if err != nil {
+				t.Fatalf("Configure returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Configure exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+			}
+
+			// Set up progress collection.
+			fn, events := collectProgress(t)
+			b.SetProgressFunc(fn)
+
+			// Build — should succeed and produce progress events.
+			result, err = b.Build(ctx, nil, 0)
+			if err != nil {
+				t.Fatalf("Build returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Build exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+			}
+
+			// Log all progress events for debugging.
+			for i, ev := range *events {
+				t.Logf("progress[%d]: current=%d total=%d message=%s", i, ev.current, ev.total, ev.message)
+			}
+
+			// Assert progress events were received.
+			if len(*events) == 0 {
+				t.Fatal("expected at least one progress callback, got none")
+			}
+
+			// Assert final callback has current == total.
+			last := (*events)[len(*events)-1]
+			if last.current != last.total {
+				t.Errorf("final progress: current=%d total=%d, expected current == total", last.current, last.total)
+			}
+
+			// Assert total > 1 (multiple TUs = multiple progress lines).
+			if last.total <= 1 {
+				t.Errorf("expected total > 1 (multiple TUs), got total=%d", last.total)
+			}
+		})
+	}
+}
+
+func TestIntegrationPresets(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+	requireCMakeMinVersion(t, 3, 21)
+
+	tc := detectToolchain(t)
+	srcDir := copyFixture(t, "cmake-presets")
+	buildDir := filepath.Join(srcDir, "build", "integration-test")
+
+	cfg := &config.Config{
+		SourceDir:             srcDir,
+		BuildDir:              buildDir,
+		Toolchain:             tc.toolchain,
+		Generator:             "ninja",
+		Preset:                "integration-test",
+		InjectDiagnosticFlags: true,
+		BuildTimeout:          2 * time.Minute,
+	}
+	b := builder.NewCMakeBuilder(cfg)
+	ctx := context.Background()
+
+	// Force CMake to use the specific compiler so the diagnostic
+	// format detection matches the toolchain expectation.
+	cxxCompiler := tc.compiler
+	cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
+	if tc.toolchain == "gcc" {
+		cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
+	}
+	extraArgs := []string{
+		"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+		"-DCMAKE_C_COMPILER=" + cCompiler,
+		"-S", srcDir,
+	}
+
+	// Configure — should succeed.
+	result, err := b.Configure(ctx, extraArgs)
+	if err != nil {
+		t.Fatalf("Configure returned error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("Configure exit code %d, stdout:\n%s\nstderr:\n%s", result.ExitCode, result.Stdout, result.Stderr)
+	}
+
+	// Assert DiagnosticFormat.cmake exists at the nested build dir.
+	moduleFile := filepath.Join(buildDir, ".cpp-build-mcp", "DiagnosticFormat.cmake")
+	if _, err := os.Stat(moduleFile); err != nil {
+		t.Fatalf("DiagnosticFormat.cmake not found at %s — MkdirAll or absolute path injection failed", moduleFile)
+	}
+
+	// Build — should succeed.
+	result, err = b.Build(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("Build exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+	}
+}
+
+func TestIntegrationTargetBuild(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	tc := detectToolchain(t)
+	srcDir := copyFixture(t, "cmake-library")
+	buildDir := filepath.Join(srcDir, "build")
+
+	cfg := &config.Config{
+		SourceDir:             srcDir,
+		BuildDir:              buildDir,
+		Toolchain:             tc.toolchain,
+		Generator:             "ninja",
+		InjectDiagnosticFlags: false,
+		BuildTimeout:          2 * time.Minute,
+	}
+	b := builder.NewCMakeBuilder(cfg)
+	ctx := context.Background()
+
+	// Configure — should succeed.
+	result, err := b.Configure(ctx, nil)
+	if err != nil {
+		t.Fatalf("Configure returned error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("Configure exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+	}
+
+	// Build target "lib".
+	result, err = b.Build(ctx, []string{"lib"}, 0)
+	if err != nil {
+		t.Fatalf("Build target 'lib' returned error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("Build target 'lib' exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+	}
+
+	// Build target "main".
+	result, err = b.Build(ctx, []string{"main"}, 0)
+	if err != nil {
+		t.Fatalf("Build target 'main' returned error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("Build target 'main' exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+	}
+}
+
