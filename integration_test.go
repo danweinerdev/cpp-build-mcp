@@ -698,3 +698,121 @@ func TestIntegrationNoteDiagnostics(t *testing.T) {
 	}
 }
 
+func TestIntegrationLinkerError(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	for _, tc := range toolchainCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			srcDir := copyFixture(t, "cmake-linker-error")
+			buildDir := filepath.Join(srcDir, "build")
+
+			cfg := &config.Config{
+				SourceDir:             srcDir,
+				BuildDir:              buildDir,
+				Toolchain:             tc.toolchain,
+				Generator:             "ninja",
+				InjectDiagnosticFlags: true,
+				BuildTimeout:          2 * time.Minute,
+			}
+			b := builder.NewCMakeBuilder(cfg)
+			ctx := context.Background()
+
+			// Force CMake to use the specific compiler so the diagnostic
+			// format detection matches the toolchain expectation.
+			cxxCompiler := tc.compiler
+			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
+			if tc.toolchain == "gcc" {
+				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
+			}
+			extraArgs := []string{
+				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_C_COMPILER=" + cCompiler,
+			}
+
+			// Configure — should succeed.
+			result, err := b.Configure(ctx, extraArgs)
+			if err != nil {
+				t.Fatalf("Configure returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Configure exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+			}
+
+			// Build — should fail due to linker error (undefined_function).
+			result, err = b.Build(ctx, nil, 0)
+			if err != nil {
+				t.Fatalf("Build returned error: %v", err)
+			}
+			if result.ExitCode == 0 {
+				t.Fatalf("Build should have failed but exit code was 0")
+			}
+
+			t.Logf("stdout:\n%s", result.Stdout)
+			t.Logf("stderr:\n%s", result.Stderr)
+
+			// Parse diagnostics — linker errors are NOT structured compiler
+			// diagnostics, so we expect none.
+			parser := diagnostics.NewParser(tc.toolchain)
+			diags, err := parser.Parse(result.Stdout, result.Stderr)
+			if err != nil {
+				t.Fatalf("Parse returned error: %v", err)
+			}
+			if len(diags) > 0 {
+				t.Errorf("expected no structured diagnostics from linker error, got %d", len(diags))
+				for _, d := range diags {
+					t.Logf("  unexpected diagnostic: file=%s severity=%s message=%s", d.File, d.Severity, d.Message)
+				}
+			}
+
+			// The linker error text mentioning "undefined_function" should
+			// appear in the raw output.
+			if !strings.Contains(result.Stderr, "undefined_function") {
+				// Also check stdout — some linker configurations write to stdout.
+				if !strings.Contains(result.Stdout, "undefined_function") {
+					t.Errorf("expected linker error mentioning 'undefined_function' in output")
+					t.Logf("stdout:\n%s", result.Stdout)
+					t.Logf("stderr:\n%s", result.Stderr)
+				}
+			}
+		})
+	}
+}
+
+func TestIntegrationConfigureError(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	srcDir := copyFixture(t, "cmake-configure-error")
+	buildDir := filepath.Join(srcDir, "build")
+
+	cfg := &config.Config{
+		SourceDir:             srcDir,
+		BuildDir:              buildDir,
+		Toolchain:             "auto",
+		Generator:             "ninja",
+		InjectDiagnosticFlags: false,
+		BuildTimeout:          2 * time.Minute,
+	}
+	b := builder.NewCMakeBuilder(cfg)
+	ctx := context.Background()
+
+	// Configure — should fail due to FATAL_ERROR in CMakeLists.txt.
+	result, err := b.Configure(ctx, nil)
+	if err != nil {
+		t.Fatalf("Configure returned error: %v", err)
+	}
+	if result.ExitCode == 0 {
+		t.Fatalf("Configure should have failed but exit code was 0")
+	}
+
+	t.Logf("stdout:\n%s", result.Stdout)
+	t.Logf("stderr:\n%s", result.Stderr)
+
+	// Assert stderr contains the intentional failure message.
+	if !strings.Contains(result.Stderr, "intentional configure failure") {
+		t.Errorf("configure stderr should contain 'intentional configure failure'")
+		t.Logf("stderr:\n%s", result.Stderr)
+	}
+}
+
