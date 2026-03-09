@@ -268,6 +268,91 @@ func TestClangParser_Parse(t *testing.T) {
 		assertDiagField(t, "Message[2]", diags[2].Message, "expected ';' after expression")
 	})
 
+	t.Run("ninja progress lines stripped from stdout", func(t *testing.T) {
+		stdout := "[1/803] Building CXX object CMakeFiles/foo.dir/foo.cpp.o\n" +
+			"[2/803] Building CXX object CMakeFiles/bar.dir/bar.cpp.o\n" +
+			`[
+			{
+				"file": "foo.cpp",
+				"line": 5,
+				"column": 7,
+				"severity": "warning",
+				"message": "unused variable 'x'",
+				"option": "-Wunused-variable",
+				"ranges": [],
+				"fixits": []
+			}
+		]` + "\n[3/803] Building CXX object CMakeFiles/baz.dir/baz.cpp.o\n"
+
+		diags, err := parser.Parse(stdout, "")
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+
+		d := diags[0]
+		assertDiagField(t, "File", d.File, "foo.cpp")
+		assertDiagSeverity(t, d.Severity, SeverityWarning)
+		assertDiagField(t, "Message", d.Message, "unused variable 'x'")
+	})
+
+	t.Run("only ninja progress lines returns empty", func(t *testing.T) {
+		stdout := "[1/10] Building CXX object CMakeFiles/foo.dir/foo.cpp.o\n" +
+			"[2/10] Building CXX object CMakeFiles/bar.dir/bar.cpp.o\n" +
+			"[3/10] Linking CXX executable foo\n"
+
+		diags, err := parser.Parse(stdout, "")
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if diags != nil {
+			t.Fatalf("expected nil slice, got %v", diags)
+		}
+	})
+
+	t.Run("ninja progress interleaved with multiple json arrays", func(t *testing.T) {
+		stdout := "[1/5] Building CXX object a.cpp.o\n" +
+			`[
+			{
+				"file": "a.cpp",
+				"line": 1,
+				"column": 1,
+				"severity": "warning",
+				"message": "warning in a",
+				"option": "-Wextra",
+				"ranges": [],
+				"fixits": []
+			}
+		]` + "\n[2/5] Building CXX object b.cpp.o\n" +
+			`[
+			{
+				"file": "b.cpp",
+				"line": 10,
+				"column": 5,
+				"severity": "error",
+				"message": "error in b",
+				"option": "",
+				"ranges": [],
+				"fixits": []
+			}
+		]` + "\n[3/5] Linking CXX executable main\n"
+
+		diags, err := parser.Parse(stdout, "")
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 2 {
+			t.Fatalf("expected 2 diagnostics, got %d", len(diags))
+		}
+
+		assertDiagField(t, "File[0]", diags[0].File, "a.cpp")
+		assertDiagSeverity(t, diags[0].Severity, SeverityWarning)
+		assertDiagField(t, "File[1]", diags[1].File, "b.cpp")
+		assertDiagSeverity(t, diags[1].Severity, SeverityError)
+	})
+
 	t.Run("stderr is ignored", func(t *testing.T) {
 		stdout := `[
 			{

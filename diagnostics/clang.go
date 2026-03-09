@@ -4,8 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 )
+
+// ninjaProgressRe matches Ninja progress lines like "[1/803] Building CXX object ..."
+// These appear in stdout when Ninja is the generator and must be stripped before
+// parsing Clang JSON diagnostics.
+var ninjaProgressRe = regexp.MustCompile(`(?m)^\[\d+/\d+\].*$`)
 
 // ClangParser parses Clang's JSON diagnostic output into structured Diagnostics.
 //
@@ -28,6 +34,11 @@ type clangDiagnostic struct {
 // Parse parses Clang JSON diagnostic output from stdout into []Diagnostic.
 // The stderr parameter is ignored because Clang writes JSON diagnostics to stdout.
 func (p *ClangParser) Parse(stdout, stderr string) ([]Diagnostic, error) {
+	// Strip Ninja progress lines before JSON parsing. When Ninja is the
+	// generator, stdout contains interleaved progress lines ([1/803] Building ...)
+	// and Clang JSON arrays. The progress lines contain brackets that confuse
+	// splitJSONArrays and produce unparseable chunks.
+	stdout = ninjaProgressRe.ReplaceAllString(stdout, "")
 	stdout = strings.TrimSpace(stdout)
 	if stdout == "" {
 		return nil, nil
