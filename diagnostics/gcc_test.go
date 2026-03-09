@@ -481,6 +481,40 @@ func TestGCCParser_Parse(t *testing.T) {
 	})
 }
 
+func TestGCCParser_NinjaNoiseStripped(t *testing.T) {
+	parser := &GCCParser{}
+
+	t.Run("FAILED and summary lines stripped from stdout", func(t *testing.T) {
+		stdout := "FAILED: CMakeFiles/main.dir/a.cpp.o\n" +
+			`[{"kind":"error","message":"undeclared","option":"","locations":[{"caret":{"file":"a.cpp","line":1,"column":1}}],"children":[]}]` + "\n" +
+			"1 error generated.\n" +
+			"ninja: build stopped: subcommand failed."
+
+		diags, err := parser.Parse(stdout, "")
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "undeclared")
+	})
+
+	t.Run("progress lines stripped from stderr", func(t *testing.T) {
+		stderr := "[1/3] Building CXX object a.cpp.o\n" +
+			`[{"kind":"warning","message":"unused","option":"-Wunused","locations":[{"caret":{"file":"a.cpp","line":5,"column":7}}],"children":[]}]`
+
+		diags, err := parser.Parse("", stderr)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "unused")
+	})
+}
+
 func TestMapGCCSeverity(t *testing.T) {
 	tests := []struct {
 		input string

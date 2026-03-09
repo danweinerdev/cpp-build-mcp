@@ -65,6 +65,7 @@ func TestMakeBuilderBuildArgs(t *testing.T) {
 
 		assertContains(t, args, "-j1")
 		assertNotContains(t, args, "-j8")
+		assertContains(t, args, "-k")
 	})
 
 	t.Run("targets and jobs together", func(t *testing.T) {

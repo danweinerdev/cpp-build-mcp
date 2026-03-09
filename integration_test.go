@@ -178,6 +178,26 @@ func assertDiagnosticFound(t *testing.T, diags []diagnostics.Diagnostic, fileSuf
 	}
 }
 
+// deriveCCompiler derives the C compiler path from a C++ compiler path.
+// It operates on the basename to avoid replacing path components, then verifies
+// the result exists via exec.LookPath. Skips the test if not found.
+func deriveCCompiler(t *testing.T, cxxPath, toolchain string) string {
+	t.Helper()
+	base := filepath.Base(cxxPath)
+	var cName string
+	switch toolchain {
+	case "gcc":
+		cName = strings.Replace(base, "g++", "gcc", 1)
+	default:
+		cName = strings.Replace(base, "++", "", 1)
+	}
+	cPath, err := exec.LookPath(cName)
+	if err != nil {
+		t.Skipf("derived C compiler %s not found (from %s)", cName, cxxPath)
+	}
+	return cPath
+}
+
 // collectProgress returns a ProgressFunc that records each progress event and a
 // pointer to the collected slice. Each call creates independent state — callers
 // get their own slice with no shared globals between subtests.
@@ -214,6 +234,8 @@ func TestIntegrationSmoke(t *testing.T) {
 			b := builder.NewCMakeBuilder(cfg)
 			ctx := context.Background()
 
+			configureOK := false
+
 			t.Run("configure", func(t *testing.T) {
 				result, err := b.Configure(ctx, nil)
 				if err != nil {
@@ -225,9 +247,13 @@ func TestIntegrationSmoke(t *testing.T) {
 				if result.Duration <= 0 {
 					t.Errorf("Configure duration should be > 0, got %v", result.Duration)
 				}
+				configureOK = true
 			})
 
 			t.Run("build", func(t *testing.T) {
+				if !configureOK {
+					t.Skip("skipping: configure failed")
+				}
 				result, err := b.Build(ctx, nil, 0)
 				if err != nil {
 					t.Fatalf("Build returned error: %v", err)
@@ -241,6 +267,9 @@ func TestIntegrationSmoke(t *testing.T) {
 			})
 
 			t.Run("clean", func(t *testing.T) {
+				if !configureOK {
+					t.Skip("skipping: configure failed")
+				}
 				result, err := b.Clean(ctx, nil)
 				if err != nil {
 					t.Fatalf("Clean returned error: %v", err)
@@ -275,15 +304,10 @@ func TestIntegrationDiagnosticInjection(t *testing.T) {
 
 			// Force CMake to use the specific compiler so the diagnostic
 			// format detection matches the toolchain expectation (e.g. clang
-			// produces sarif, gcc produces json). Derive the C compiler path
-			// from the C++ compiler path (clang++→clang, g++→gcc).
-			cxxCompiler := tc.compiler
-			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
-			if tc.toolchain == "gcc" {
-				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
-			}
+			// produces sarif, gcc produces json).
+			cCompiler := deriveCCompiler(t, tc.compiler, tc.toolchain)
 			extraArgs := []string{
-				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_CXX_COMPILER=" + tc.compiler,
 				"-DCMAKE_C_COMPILER=" + cCompiler,
 			}
 
@@ -307,7 +331,7 @@ func TestIntegrationDiagnosticInjection(t *testing.T) {
 			// Check both to be resilient to CMake version differences.
 			configureOutput := result.Stdout + result.Stderr
 			if !strings.Contains(configureOutput, "[cpp-build-mcp] Diagnostic format:") {
-				t.Errorf("configure output missing diagnostic format message")
+				t.Fatalf("configure output missing diagnostic format message")
 			}
 			t.Logf("configure stdout:\n%s", result.Stdout)
 			t.Logf("configure stderr:\n%s", result.Stderr)
@@ -358,13 +382,9 @@ func TestIntegrationErrorDiagnostics(t *testing.T) {
 
 			// Force CMake to use the specific compiler so the diagnostic
 			// format detection matches the toolchain expectation.
-			cxxCompiler := tc.compiler
-			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
-			if tc.toolchain == "gcc" {
-				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
-			}
+			cCompiler := deriveCCompiler(t, tc.compiler, tc.toolchain)
 			extraArgs := []string{
-				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_CXX_COMPILER=" + tc.compiler,
 				"-DCMAKE_C_COMPILER=" + cCompiler,
 			}
 
@@ -427,13 +447,9 @@ func TestIntegrationWarningDiagnostics(t *testing.T) {
 
 			// Force CMake to use the specific compiler so the diagnostic
 			// format detection matches the toolchain expectation.
-			cxxCompiler := tc.compiler
-			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
-			if tc.toolchain == "gcc" {
-				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
-			}
+			cCompiler := deriveCCompiler(t, tc.compiler, tc.toolchain)
 			extraArgs := []string{
-				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_CXX_COMPILER=" + tc.compiler,
 				"-DCMAKE_C_COMPILER=" + cCompiler,
 			}
 
@@ -497,13 +513,9 @@ func TestIntegrationMultiError(t *testing.T) {
 
 			// Force CMake to use the specific compiler so the diagnostic
 			// format detection matches the toolchain expectation.
-			cxxCompiler := tc.compiler
-			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
-			if tc.toolchain == "gcc" {
-				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
-			}
+			cCompiler := deriveCCompiler(t, tc.compiler, tc.toolchain)
 			extraArgs := []string{
-				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_CXX_COMPILER=" + tc.compiler,
 				"-DCMAKE_C_COMPILER=" + cCompiler,
 			}
 
@@ -568,13 +580,9 @@ func TestIntegrationMixedDiagnostics(t *testing.T) {
 
 			// Force CMake to use the specific compiler so the diagnostic
 			// format detection matches the toolchain expectation.
-			cxxCompiler := tc.compiler
-			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
-			if tc.toolchain == "gcc" {
-				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
-			}
+			cCompiler := deriveCCompiler(t, tc.compiler, tc.toolchain)
 			extraArgs := []string{
-				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_CXX_COMPILER=" + tc.compiler,
 				"-DCMAKE_C_COMPILER=" + cCompiler,
 			}
 
@@ -638,13 +646,9 @@ func TestIntegrationNoteDiagnostics(t *testing.T) {
 
 			// Force CMake to use the specific compiler so the diagnostic
 			// format detection matches the toolchain expectation.
-			cxxCompiler := tc.compiler
-			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
-			if tc.toolchain == "gcc" {
-				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
-			}
+			cCompiler := deriveCCompiler(t, tc.compiler, tc.toolchain)
 			extraArgs := []string{
-				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_CXX_COMPILER=" + tc.compiler,
 				"-DCMAKE_C_COMPILER=" + cCompiler,
 			}
 
@@ -720,13 +724,9 @@ func TestIntegrationLinkerError(t *testing.T) {
 
 			// Force CMake to use the specific compiler so the diagnostic
 			// format detection matches the toolchain expectation.
-			cxxCompiler := tc.compiler
-			cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
-			if tc.toolchain == "gcc" {
-				cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
-			}
+			cCompiler := deriveCCompiler(t, tc.compiler, tc.toolchain)
 			extraArgs := []string{
-				"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+				"-DCMAKE_CXX_COMPILER=" + tc.compiler,
 				"-DCMAKE_C_COMPILER=" + cCompiler,
 			}
 
@@ -905,13 +905,9 @@ func TestIntegrationPresets(t *testing.T) {
 
 	// Force CMake to use the specific compiler so the diagnostic
 	// format detection matches the toolchain expectation.
-	cxxCompiler := tc.compiler
-	cCompiler := strings.Replace(cxxCompiler, "++", "", 1)
-	if tc.toolchain == "gcc" {
-		cCompiler = strings.Replace(cxxCompiler, "g++", "gcc", 1)
-	}
+	cCompiler := deriveCCompiler(t, tc.compiler, tc.toolchain)
 	extraArgs := []string{
-		"-DCMAKE_CXX_COMPILER=" + cxxCompiler,
+		"-DCMAKE_CXX_COMPILER=" + tc.compiler,
 		"-DCMAKE_C_COMPILER=" + cCompiler,
 		"-S", srcDir,
 	}

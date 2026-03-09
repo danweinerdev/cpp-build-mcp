@@ -128,25 +128,33 @@ func (p *ClangParser) parseClangJSON(input string) ([]Diagnostic, error) {
 	return result, nil
 }
 
-// hasStructuredContent reports whether s contains structured JSON content
-// (a '{' or '[' character that could begin a JSON value). The check scans
-// the entire string rather than only the first character, because Ninja
-// build output may prepend non-JSON text (compiler invocation lines, etc.)
-// before the actual diagnostic JSON even after progress/failure lines have
-// been stripped.
+// hasStructuredContent reports whether s contains a line whose first
+// non-whitespace character is '{' or '[', indicating structured JSON content.
+// Checking per-line (rather than anywhere in the string) avoids false
+// positives from compiler invocation lines that may contain brackets.
 func hasStructuredContent(s string) bool {
-	return strings.ContainsAny(s, "{[")
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+			return true
+		}
+	}
+	return false
 }
 
-// detectOutputFormat scans s for the first '{' or '[' character and returns
-// "sarif" if '{' appears first (SARIF 2.1.0 from -fdiagnostics-format=sarif),
-// "clang-json" if '[' appears first (native Clang JSON array), or "" if
-// neither is found. Scanning the full string (rather than only the first
-// character) allows detection even when non-JSON text (compiler invocation
-// lines, etc.) precedes the diagnostic output.
+// detectOutputFormat scans s line-by-line for the first line whose leading
+// non-whitespace character is '{' or '['. Returns "sarif" if '{' is found
+// first (SARIF 2.1.0 from -fdiagnostics-format=sarif), "clang-json" if '['
+// is found first (native Clang JSON array), or "" if neither is found.
+// Per-line detection avoids misidentification from brackets in compiler
+// invocation lines that may precede the diagnostic JSON output.
 func detectOutputFormat(s string) string {
-	for _, ch := range s {
-		switch ch {
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) == 0 {
+			continue
+		}
+		switch trimmed[0] {
 		case '{':
 			return "sarif"
 		case '[':

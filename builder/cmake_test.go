@@ -332,6 +332,8 @@ func TestBuildBuildArgs(t *testing.T) {
 
 		assertContains(t, args, "-j1")
 		assertNotContains(t, args, "-j8")
+		assertContains(t, args, "-k")
+		assertContains(t, args, "0")
 	})
 
 	t.Run("dirty flag adds clean-first and clears", func(t *testing.T) {

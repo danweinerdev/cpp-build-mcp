@@ -490,6 +490,80 @@ func TestClangParser_Parse(t *testing.T) {
 	})
 }
 
+func TestStripNinjaNoise(t *testing.T) {
+	t.Run("strips progress lines", func(t *testing.T) {
+		input := "[1/5] Building CXX object a.cpp.o\n[{\"file\":\"a.cpp\"}]\n[2/5] Building CXX object b.cpp.o"
+		got := stripNinjaNoise(input)
+		if strings.Contains(got, "[1/5]") || strings.Contains(got, "[2/5]") {
+			t.Errorf("progress lines not stripped: %q", got)
+		}
+		if !strings.Contains(got, `[{"file":"a.cpp"}]`) {
+			t.Errorf("JSON content should be preserved: %q", got)
+		}
+	})
+
+	t.Run("strips FAILED lines", func(t *testing.T) {
+		input := "FAILED: CMakeFiles/main.dir/a.cpp.o\n[{\"file\":\"a.cpp\"}]"
+		got := stripNinjaNoise(input)
+		if strings.Contains(got, "FAILED:") {
+			t.Errorf("FAILED line not stripped: %q", got)
+		}
+		if !strings.Contains(got, `[{"file":"a.cpp"}]`) {
+			t.Errorf("JSON content should be preserved: %q", got)
+		}
+	})
+
+	t.Run("strips ninja summary lines", func(t *testing.T) {
+		input := "[{\"file\":\"a.cpp\"}]\nninja: build stopped: subcommand failed."
+		got := stripNinjaNoise(input)
+		if strings.Contains(got, "ninja:") {
+			t.Errorf("ninja summary not stripped: %q", got)
+		}
+		if !strings.Contains(got, `[{"file":"a.cpp"}]`) {
+			t.Errorf("JSON content should be preserved: %q", got)
+		}
+	})
+
+	t.Run("strips compiler count lines", func(t *testing.T) {
+		input := "[{\"file\":\"a.cpp\"}]\n1 error generated.\n2 warnings generated."
+		got := stripNinjaNoise(input)
+		if strings.Contains(got, "error generated") || strings.Contains(got, "warnings generated") {
+			t.Errorf("compiler count lines not stripped: %q", got)
+		}
+	})
+
+	t.Run("strips all noise types together", func(t *testing.T) {
+		input := "[1/3] Building CXX object a.cpp.o\n" +
+			"FAILED: CMakeFiles/main.dir/a.cpp.o\n" +
+			`[{"file":"a.cpp","line":1,"column":1,"severity":"error","message":"err","option":""}]` + "\n" +
+			"1 error generated.\n" +
+			"ninja: build stopped: subcommand failed."
+		got := stripNinjaNoise(input)
+		if strings.Contains(got, "[1/3]") {
+			t.Error("progress line not stripped")
+		}
+		if strings.Contains(got, "FAILED:") {
+			t.Error("FAILED line not stripped")
+		}
+		if strings.Contains(got, "error generated") {
+			t.Error("compiler count not stripped")
+		}
+		if strings.Contains(got, "ninja:") {
+			t.Error("ninja summary not stripped")
+		}
+		if !strings.Contains(got, `"severity":"error"`) {
+			t.Error("JSON diagnostic content should be preserved")
+		}
+	})
+
+	t.Run("empty input returns empty", func(t *testing.T) {
+		got := stripNinjaNoise("")
+		if got != "" {
+			t.Errorf("expected empty string, got %q", got)
+		}
+	})
+}
+
 func TestSplitJSONArrays(t *testing.T) {
 	t.Run("single array", func(t *testing.T) {
 		arrays := splitJSONArrays(`[{"a":1}]`)
