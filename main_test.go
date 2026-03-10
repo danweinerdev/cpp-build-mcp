@@ -78,6 +78,10 @@ func (f *fakeBuilder) Clean(_ context.Context, targets []string) (*builder.Build
 	return &builder.BuildResult{}, nil
 }
 
+func (f *fakeBuilder) ListTargets(_ context.Context) ([]builder.TargetInfo, error) {
+	return nil, nil
+}
+
 func (f *fakeBuilder) SetDirty(dirty bool) { f.lastDirtySet = dirty }
 
 // newTestServer creates an mcpServer with a fakeBuilder and fresh state store.

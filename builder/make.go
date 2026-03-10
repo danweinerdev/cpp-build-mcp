@@ -68,6 +68,12 @@ func (b *MakeBuilder) Clean(ctx context.Context, _ []string) (*BuildResult, erro
 	return b.runMake(ctx, args)
 }
 
+// ListTargets returns ErrTargetsNotSupported because GNU Make does not provide
+// a reliable way to enumerate all targets.
+func (b *MakeBuilder) ListTargets(_ context.Context) ([]TargetInfo, error) {
+	return nil, ErrTargetsNotSupported
+}
+
 // buildBuildArgs constructs the argument list for a make invocation.
 func (b *MakeBuilder) buildBuildArgs(targets []string, jobs int) []string {
 	args := []string{"-C", b.cfg.BuildDir}

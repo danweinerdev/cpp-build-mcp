@@ -138,6 +138,12 @@ func (b *CMakeBuilder) Clean(ctx context.Context, targets []string) (*BuildResul
 	return b.run(ctx, "cmake", args)
 }
 
+// ListTargets returns the list of build targets. This is a stub that will be
+// implemented with real Ninja target parsing in a later task.
+func (b *CMakeBuilder) ListTargets(ctx context.Context) ([]TargetInfo, error) {
+	return nil, errors.New("not yet implemented")
+}
+
 // generatorCMakeName maps a normalized generator name (as stored in
 // Config.Generator) to the full name that cmake's -G flag expects.
 //   - "ninja" -> "Ninja"

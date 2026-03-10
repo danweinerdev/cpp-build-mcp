@@ -3,11 +3,21 @@ package builder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/danweinerdev/cpp-build-mcp/config"
 )
+
+// TargetInfo describes a single build target.
+type TargetInfo struct {
+	Name string `json:"name"`
+}
+
+// ErrTargetsNotSupported is returned by ListTargets when the build system
+// backend does not support enumerating targets.
+var ErrTargetsNotSupported = errors.New("target listing not supported for this build system")
 
 // BuildResult holds the output and metadata from a build system invocation.
 type BuildResult struct {
@@ -23,6 +33,7 @@ type Builder interface {
 	Configure(ctx context.Context, args []string) (*BuildResult, error)
 	Build(ctx context.Context, targets []string, jobs int) (*BuildResult, error)
 	Clean(ctx context.Context, targets []string) (*BuildResult, error)
+	ListTargets(ctx context.Context) ([]TargetInfo, error)
 	SetDirty(dirty bool)
 }
 
