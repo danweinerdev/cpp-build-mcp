@@ -556,6 +556,46 @@ func TestStripNinjaNoise(t *testing.T) {
 		}
 	})
 
+	t.Run("strips cmake status lines", func(t *testing.T) {
+		input := "-- The CXX compiler identification is Clang 19.0.0\n" +
+			"-- Configuring done (0.5s)\n" +
+			"-- Generating done (0.0s)\n" +
+			"-- Build files have been written to: /tmp/build\n" +
+			`{"runs":[{"results":[]}]}`
+		got := stripNinjaNoise(input)
+		if strings.Contains(got, "-- ") {
+			t.Errorf("cmake status lines not stripped: %q", got)
+		}
+		if !strings.Contains(got, `{"runs"`) {
+			t.Errorf("SARIF content should be preserved: %q", got)
+		}
+	})
+
+	t.Run("strips cmake status mixed with all noise types", func(t *testing.T) {
+		input := "[1/3] Re-running CMake...\n" +
+			"-- Git submodule detected\n" +
+			"-- Fusion installation enabled\n" +
+			"-- Configuring done\n" +
+			"[2/3] Building CXX object main.cpp.o\n" +
+			"FAILED: CMakeFiles/main.dir/main.cpp.o\n" +
+			`{"runs":[{"results":[{"level":"error","message":{"text":"err"}}]}]}` + "\n" +
+			"1 error generated.\n" +
+			"ninja: build stopped: subcommand failed."
+		got := stripNinjaNoise(input)
+		if strings.Contains(got, "-- Git") {
+			t.Error("cmake status line not stripped")
+		}
+		if strings.Contains(got, "[1/3]") {
+			t.Error("progress line not stripped")
+		}
+		if strings.Contains(got, "FAILED:") {
+			t.Error("FAILED line not stripped")
+		}
+		if !strings.Contains(got, `"level":"error"`) {
+			t.Error("SARIF diagnostic content should be preserved")
+		}
+	})
+
 	t.Run("empty input returns empty", func(t *testing.T) {
 		got := stripNinjaNoise("")
 		if got != "" {

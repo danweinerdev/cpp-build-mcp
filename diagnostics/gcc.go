@@ -52,12 +52,17 @@ type gccDiagnostic struct {
 // is stripped from both streams before parsing to prevent it from being
 // mistaken for JSON array content.
 func (p *GCCParser) Parse(stdout, stderr string) ([]Diagnostic, error) {
-	// Strip Ninja noise from both streams before format detection.
+	// Strip build system noise from both streams before format detection.
 	stdout = stripNinjaNoise(stdout)
 	stderr = stripNinjaNoise(stderr)
 
-	input := strings.TrimSpace(stdout)
-	if input == "" {
+	// Select stream: prefer stdout if it has structured JSON content,
+	// fall back to stderr. This avoids picking stdout when it only
+	// contains non-JSON noise (e.g., CMake reconfigure status lines).
+	var input string
+	if hasStructuredContent(stdout) {
+		input = strings.TrimSpace(stdout)
+	} else if hasStructuredContent(stderr) {
 		input = strings.TrimSpace(stderr)
 	}
 	if input == "" {

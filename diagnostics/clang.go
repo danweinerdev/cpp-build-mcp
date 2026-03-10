@@ -28,16 +28,24 @@ var ninjaSummaryRe = regexp.MustCompile(`(?m)^ninja:.*$`)
 // "2 warnings generated." that Clang appends after its diagnostic output.
 var compilerCountRe = regexp.MustCompile(`(?m)^\d+ (?:error|warning)s? generated\.$`)
 
-// stripNinjaNoise removes Ninja build system output lines and compiler
-// summary lines from s, leaving only the compiler's structured diagnostic
-// output. This includes progress lines ("[1/42] Building ..."), failure
-// preamble ("FAILED: ..."), summary ("ninja: build stopped ..."), and
-// compiler diagnostics count ("1 error generated.").
+// cmakeStatusRe matches CMake status lines like "-- The CXX compiler
+// identification is Clang 19.0.0". These appear on stderr when a build
+// triggers an automatic CMake reconfigure (because CMakeLists.txt changed)
+// and must be stripped before parsing diagnostics.
+var cmakeStatusRe = regexp.MustCompile(`(?m)^-- .*$`)
+
+// stripNinjaNoise removes build system noise from s, leaving only the
+// compiler's structured diagnostic output. This includes Ninja progress
+// lines ("[1/42] Building ..."), failure preamble ("FAILED: ..."), summary
+// ("ninja: build stopped ..."), compiler diagnostics count ("1 error
+// generated."), and CMake status lines ("-- Configuring done") that appear
+// when a build triggers an automatic reconfigure.
 func stripNinjaNoise(s string) string {
 	s = ninjaProgressRe.ReplaceAllString(s, "")
 	s = ninjaFailedRe.ReplaceAllString(s, "")
 	s = ninjaSummaryRe.ReplaceAllString(s, "")
 	s = compilerCountRe.ReplaceAllString(s, "")
+	s = cmakeStatusRe.ReplaceAllString(s, "")
 	return s
 }
 

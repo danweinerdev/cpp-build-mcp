@@ -180,3 +180,90 @@ func TestSARIFFormatDetection(t *testing.T) {
 		}
 	})
 }
+
+func TestClangParserSARIFWithCMakeReconfigure(t *testing.T) {
+	// When CMakeLists.txt changes, cmake --build triggers a reconfigure
+	// before the actual build. The reconfigure output (-- prefixed lines)
+	// gets mixed into the stderr stream alongside clang's SARIF diagnostics.
+	parser := &ClangParser{}
+
+	t.Run("SARIF on stderr with cmake reconfigure noise", func(t *testing.T) {
+		stderr := "[1/5] Re-running CMake...\n" +
+			"-- The CXX compiler identification is Clang 19.0.0\n" +
+			"-- Git submodule detected\n" +
+			"-- Fusion installation enabled\n" +
+			"-- Configuring done (0.5s)\n" +
+			"-- Generating done (0.0s)\n" +
+			"-- Build files have been written to: /tmp/build\n" +
+			"[2/5] Building CXX object CMakeFiles/main.dir/test.cpp.o\n" +
+			"\n" + clangSARIFWarning + "\n\n" +
+			"1 warning generated.\n" +
+			"[3/5] Linking CXX executable main\n" +
+			"ninja: build stopped: subcommand failed."
+
+		diags, err := parser.Parse("", stderr)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		d := diags[0]
+		assertDiagField(t, "File", d.File, "/tmp/test_diag.cpp")
+		assertDiagSeverity(t, d.Severity, SeverityWarning)
+		assertDiagField(t, "Message", d.Message, "unused variable 'unused_var'")
+	})
+
+	t.Run("SARIF on stderr with cmake noise on stdout", func(t *testing.T) {
+		// CMake reconfigure output on stdout, SARIF on stderr.
+		// Parser should skip stdout noise and find SARIF on stderr.
+		stdout := "-- Configuring done\n-- Generating done\n-- Build files have been written to: /tmp/build\n"
+		stderr := "\n" + clangSARIFWarning + "\n\n1 warning generated.\n"
+
+		diags, err := parser.Parse(stdout, stderr)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "unused variable 'unused_var'")
+	})
+}
+
+func TestGCCParserWithCMakeReconfigure(t *testing.T) {
+	// Same scenario as above but with GCC JSON diagnostics.
+	gccJSON := `[{"kind": "warning",
+  "message": "unused variable 'x'",
+  "option": "-Wunused-variable",
+  "children": [],
+  "column-origin": 1,
+  "locations": [{"caret": {"file": "test.cpp", "line": 2, "column": 9}}]}]`
+
+	parser := &GCCParser{}
+
+	t.Run("GCC JSON on stderr with cmake noise on stdout", func(t *testing.T) {
+		stdout := "-- Configuring done\n-- Generating done\n"
+		diags, err := parser.Parse(stdout, gccJSON)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "unused variable 'x'")
+	})
+
+	t.Run("GCC JSON on stderr with cmake noise on both streams", func(t *testing.T) {
+		stdout := "-- The CXX compiler identification is GCC 15.2.0\n-- Configuring done\n"
+		stderr := "-- Build files have been written to: /tmp/build\n" + gccJSON + "\n"
+		diags, err := parser.Parse(stdout, stderr)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "unused variable 'x'")
+	})
+}
