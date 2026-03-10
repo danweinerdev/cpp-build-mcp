@@ -2,6 +2,7 @@ package builder
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -254,6 +255,19 @@ func TestNewBuilderMake(t *testing.T) {
 	}
 	if mb.cfg != cfg {
 		t.Fatal("expected MakeBuilder to hold the same config pointer")
+	}
+}
+
+func TestMakeBuilderListTargetsNotSupported(t *testing.T) {
+	cfg := &config.Config{BuildDir: "build", BuildTimeout: 5 * time.Minute}
+	b := NewMakeBuilder(cfg)
+
+	_, err := b.ListTargets(context.Background())
+	if err == nil {
+		t.Fatal("expected error from ListTargets")
+	}
+	if !errors.Is(err, ErrTargetsNotSupported) {
+		t.Fatalf("expected ErrTargetsNotSupported, got %v", err)
 	}
 }
 

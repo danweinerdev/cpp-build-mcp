@@ -3,42 +3,42 @@ title: "Target Discovery"
 type: phase
 plan: PartialTargetBuilds
 phase: 1
-status: planned
+status: complete
 created: 2026-03-09
 updated: 2026-03-09
 deliverable: "list_targets MCP tool that enumerates user-defined CMake targets, with unit tests for both Ninja and Makefile generator output parsing. Builder interface extended with ListTargets method."
 tasks:
   - id: "1.1"
     title: "Extend Builder interface with ListTargets"
-    status: planned
+    status: complete
     verification: "Builder interface in builder/builder.go includes ListTargets(ctx context.Context) ([]TargetInfo, error). TargetInfo struct has Name string field with json tag. ErrTargetsNotSupported sentinel error is exported. go vet passes."
   - id: "1.2"
     title: "Implement parseTargetList parser"
-    status: planned
+    status: complete
     depends_on: ["1.1"]
     verification: "parseTargetList(stdout string) []TargetInfo correctly parses both Ninja format (bare lines, optional ': phony' suffix) and Makefile format ('... name' prefix with optional parenthetical). Internal targets are filtered: all, clean, help, depend, edit_cache, rebuild_cache, install, install/local, install/strip, list_install_components, package, package_source, test, RUN_TESTS, NightlyMemoryCheck, targets containing '/', targets ending in .o or .obj. Empty input returns empty slice. Unit tests use inline fixture strings from the design's Parser Specification."
   - id: "1.3"
     title: "Implement CMakeBuilder.ListTargets"
-    status: planned
+    status: complete
     depends_on: ["1.2"]
     verification: "CMakeBuilder.ListTargets runs cmake --build <buildDir> --target help, passes stdout to parseTargetList, returns result. Non-zero exit code returns error with stderr content. Unit test with mock exec verifies the command args."
   - id: "1.4"
     title: "Implement MakeBuilder.ListTargets"
-    status: planned
+    status: complete
     depends_on: ["1.1"]
     verification: "MakeBuilder.ListTargets returns ErrTargetsNotSupported. Unit test asserts errors.Is(err, ErrTargetsNotSupported)."
   - id: "1.5"
     title: "Add list_targets MCP tool"
-    status: planned
+    status: complete
     depends_on: ["1.3", "1.4"]
     verification: "list_targets tool registered in main.go with config? string parameter. Handler checks store.GetPhase() >= PhaseConfigured (returns tool error if not). Handler checks store.IsBuilding() (returns tool error if build in progress). On success, returns JSON {config, targets: [{name}], count}. On ErrTargetsNotSupported, returns tool error with clear message. Unit tests with mock builder: success case, unconfigured case, build-in-progress case, ErrTargetsNotSupported case."
   - id: "1.6"
     title: "Add IsBuilding method to Store"
-    status: planned
+    status: complete
     verification: "state.Store.IsBuilding() bool returns the current BuildInProgress flag under read lock. Unit test verifies it returns false initially, true between StartBuild/FinishBuild."
   - id: "1.7"
     title: "Structural verification"
-    status: planned
+    status: complete
     depends_on: ["1.5", "1.6"]
     verification: "go vet ./... clean. go test -race ./... passes all packages. All pre-existing tests pass unchanged."
 ---

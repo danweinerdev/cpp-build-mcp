@@ -139,10 +139,49 @@ func (b *CMakeBuilder) Clean(ctx context.Context, targets []string) (*BuildResul
 	return b.run(ctx, "cmake", args)
 }
 
-// ListTargets returns the list of build targets by running
-// cmake --build <buildDir> --target help and parsing the output through
-// parseTargetList, which filters out internal CMake targets.
+// ListTargets returns the list of build targets available in the configured
+// build directory. For Ninja generator builds, it uses `ninja -t targets all`
+// which reliably lists all targets (including executables) on all CMake/Ninja
+// versions. For other generators, it falls back to `cmake --build --target help`.
+//
+// Note: CMake 3.31+ with Ninja changed the `--target help` output to omit
+// executable targets (only phony aliases like libraries appear). The direct
+// `ninja -t targets all` approach avoids this gap.
 func (b *CMakeBuilder) ListTargets(ctx context.Context) ([]TargetInfo, error) {
+	gen := b.cfg.Generator
+	if gen == "" {
+		gen = "ninja"
+	}
+
+	if gen == "ninja" {
+		return b.listTargetsNinja(ctx)
+	}
+	return b.listTargetsCMake(ctx)
+}
+
+// listTargetsNinja lists targets by running `ninja -t targets all` directly.
+// This is more reliable than `cmake --build --target help` for Ninja, because
+// CMake 3.31+ omits executable targets from the help output.
+func (b *CMakeBuilder) listTargetsNinja(ctx context.Context) ([]TargetInfo, error) {
+	var stdout, stderr bytes.Buffer
+
+	cmd := exec.CommandContext(ctx, "ninja", "-C", b.cfg.BuildDir, "-t", "targets", "all")
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("ninja -t targets cancelled: %w", ctx.Err())
+		}
+		return nil, fmt.Errorf("ninja -t targets failed: %s", stderr.String())
+	}
+
+	return parseNinjaTargetsAll(stdout.String()), nil
+}
+
+// listTargetsCMake lists targets via `cmake --build --target help`. Used for
+// non-Ninja generators (e.g., Unix Makefiles).
+func (b *CMakeBuilder) listTargetsCMake(ctx context.Context) ([]TargetInfo, error) {
 	var stdout, stderr bytes.Buffer
 
 	cmd := exec.CommandContext(ctx, "cmake", "--build", b.cfg.BuildDir, "--target", "help")
@@ -174,6 +213,77 @@ var internalTargets = map[string]bool{
 	"test":                     true,
 	"RUN_TESTS":                true,
 	"NightlyMemoryCheck":       true,
+}
+
+// parseNinjaTargetsAll parses the output of `ninja -t targets all` into a list
+// of user-defined targets. Each line has the format "name: rule". User targets
+// are those with LINKER rules (executables/libraries) or phony rules that match
+// user-defined names. Internal CMake targets are filtered out.
+func parseNinjaTargetsAll(stdout string) []TargetInfo {
+	lines := strings.Split(stdout, "\n")
+	seen := make(map[string]bool)
+	var targets []TargetInfo
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Each line is "target_name: rule_name"
+		colonIdx := strings.Index(line, ": ")
+		if colonIdx < 0 {
+			continue
+		}
+		name := line[:colonIdx]
+		rule := line[colonIdx+2:]
+
+		// Only include targets with phony or LINKER rules
+		isPhony := rule == "phony"
+		isLinker := strings.Contains(rule, "LINKER")
+		if !isPhony && !isLinker {
+			continue
+		}
+
+		// Filter: internal targets
+		if internalTargets[name] {
+			continue
+		}
+		// Filter: targets containing "/" (internal CMake directory targets)
+		if strings.Contains(name, "/") {
+			continue
+		}
+		// Filter: targets starting with "cmake_" (internal)
+		if strings.HasPrefix(name, "cmake_") {
+			continue
+		}
+		// Filter: targets starting with "CMakeFiles/" already caught by "/" check
+		// Filter: object file targets
+		if strings.HasSuffix(name, ".o") || strings.HasSuffix(name, ".obj") {
+			continue
+		}
+		// Filter: library file outputs (e.g., libmylib.a, libmylib.so, libmylib.so.1.2.3)
+		if strings.HasPrefix(name, "lib") && (strings.HasSuffix(name, ".a") || strings.HasSuffix(name, ".so") || strings.Contains(name, ".so.")) {
+			continue
+		}
+		// Filter: build.ninja itself
+		if name == "build.ninja" || name == "CMakeCache.txt" {
+			continue
+		}
+
+		// Deduplicate: a target may appear as both phony and linker rule
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+
+		targets = append(targets, TargetInfo{Name: name})
+	}
+
+	if targets == nil {
+		return []TargetInfo{}
+	}
+	return targets
 }
 
 // parseTargetList parses the output of `cmake --build <dir> --target help`

@@ -1,7 +1,7 @@
 ---
 title: "Partial Target Builds"
 type: plan
-status: approved
+status: active
 created: 2026-03-09
 updated: 2026-03-09
 tags: [mcp, cmake, targets, build-system]
@@ -9,7 +9,7 @@ related: [Designs/PartialTargetBuilds]
 phases:
   - id: 1
     title: "Target Discovery"
-    status: planned
+    status: complete
     doc: "01-Target-Discovery.md"
   - id: 2
     title: "Response Enhancements and Clean Hardening"

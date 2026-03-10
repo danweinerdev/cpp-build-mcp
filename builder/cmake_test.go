@@ -474,6 +474,71 @@ func TestParseTargetList(t *testing.T) {
 	})
 }
 
+func TestParseNinjaTargetsAll(t *testing.T) {
+	t.Run("real ninja output", func(t *testing.T) {
+		input := `cmake_object_order_depends_target_myapp: phony
+CMakeFiles/myapp.dir/main.c.o: C_COMPILER__myapp_unscanned_
+myapp: C_EXECUTABLE_LINKER__myapp_
+cmake_object_order_depends_target_mylib: phony
+CMakeFiles/mylib.dir/lib.c.o: C_COMPILER__mylib_unscanned_
+libmylib.a: C_STATIC_LIBRARY_LINKER__mylib_
+CMakeFiles/edit_cache.util: CUSTOM_COMMAND
+edit_cache: phony
+CMakeFiles/rebuild_cache.util: CUSTOM_COMMAND
+rebuild_cache: phony
+mylib: phony
+all: phony
+build.ninja: RERUN_CMAKE
+clean: CLEAN
+help: HELP
+`
+		result := parseNinjaTargetsAll(input)
+		names := make(map[string]bool)
+		for _, t := range result {
+			names[t.Name] = true
+		}
+		// Should find both user targets
+		if !names["myapp"] {
+			t.Error("expected myapp in targets")
+		}
+		if !names["mylib"] {
+			t.Error("expected mylib in targets")
+		}
+		// Should NOT find internal targets
+		for _, bad := range []string{"edit_cache", "rebuild_cache", "all", "clean", "help", "build.ninja"} {
+			if names[bad] {
+				t.Errorf("internal target %q should be filtered", bad)
+			}
+		}
+		// Should NOT find cmake_ prefixed targets
+		for name := range names {
+			if strings.HasPrefix(name, "cmake_") {
+				t.Errorf("cmake_ prefixed target %q should be filtered", name)
+			}
+		}
+		// Should NOT find library file outputs
+		if names["libmylib.a"] {
+			t.Error("library file target libmylib.a should be filtered")
+		}
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		result := parseNinjaTargetsAll("")
+		if len(result) != 0 {
+			t.Fatalf("expected 0 targets, got %d: %v", len(result), result)
+		}
+	})
+
+	t.Run("deduplicates phony and linker", func(t *testing.T) {
+		// A target might appear as both phony and linker
+		input := "myapp: phony\nmyapp: C_EXECUTABLE_LINKER__myapp_\n"
+		result := parseNinjaTargetsAll(input)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 target (deduplicated), got %d: %v", len(result), result)
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Progress notification tests — uses shell scripts, no cmake required
 // ---------------------------------------------------------------------------
@@ -845,6 +910,70 @@ add_executable(test_app main.c)
 	for _, tgt := range targets {
 		if tgt.Name == "clean" || tgt.Name == "all" || tgt.Name == "help" || tgt.Name == "edit_cache" || tgt.Name == "rebuild_cache" {
 			t.Errorf("internal target %q should have been filtered", tgt.Name)
+		}
+	}
+}
+
+func TestCMakeBuilderListTargetsNinjaIntegration(t *testing.T) {
+	if _, err := exec.LookPath("cmake"); err != nil {
+		t.Skip("cmake not found")
+	}
+	if _, err := exec.LookPath("ninja"); err != nil {
+		t.Skip("ninja not found")
+	}
+
+	dir := t.TempDir()
+	cmakeLists := `cmake_minimum_required(VERSION 3.10)
+project(test_project C)
+add_executable(test_app main.c)
+add_library(test_lib STATIC lib.c)
+`
+	os.WriteFile(filepath.Join(dir, "CMakeLists.txt"), []byte(cmakeLists), 0o644)
+	os.WriteFile(filepath.Join(dir, "main.c"), []byte("int main(void) { return 0; }\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "lib.c"), []byte("void foo(void) {}\n"), 0o644)
+
+	buildDir := filepath.Join(dir, "build")
+	cfg := &config.Config{
+		SourceDir:             dir,
+		BuildDir:              buildDir,
+		Generator:             "ninja",
+		BuildTimeout:          2 * time.Minute,
+		InjectDiagnosticFlags: false,
+	}
+
+	b := NewCMakeBuilder(cfg)
+	ctx := context.Background()
+
+	result, err := b.Configure(ctx, nil)
+	if err != nil {
+		t.Fatalf("Configure failed: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("Configure exit code %d: %s", result.ExitCode, result.Stderr)
+	}
+
+	targets, err := b.ListTargets(ctx)
+	if err != nil {
+		t.Fatalf("ListTargets failed: %v", err)
+	}
+
+	names := make(map[string]bool)
+	for _, tgt := range targets {
+		names[tgt.Name] = true
+	}
+
+	// Both executable and library should be found via ninja -t targets all
+	if !names["test_app"] {
+		t.Errorf("expected to find 'test_app' in targets, got %v", targets)
+	}
+	if !names["test_lib"] {
+		t.Errorf("expected to find 'test_lib' in targets, got %v", targets)
+	}
+
+	// Should NOT contain internal targets
+	for _, bad := range []string{"clean", "all", "help", "edit_cache", "rebuild_cache", "build.ninja"} {
+		if names[bad] {
+			t.Errorf("internal target %q should have been filtered", bad)
 		}
 	}
 }
