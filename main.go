@@ -457,7 +457,7 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 		ErrorCount:       len(errs),
 		WarningCount:     len(warns),
 		DurationMs:       result.Duration.Milliseconds(),
-		FilesCompiled:    parseFilesCompiled(result.Stderr),
+		FilesCompiled:    parseFilesCompiled(result.Stdout),
 		TargetsRequested: targets,
 	}
 
@@ -903,11 +903,11 @@ func (srv *mcpServer) handleSuggestFix(_ context.Context, req mcp.CallToolReques
 // For Ninja builds, it parses [N/M] progress lines and returns the highest N.
 // For Make builds (when no Ninja progress is found), it counts lines that look
 // like compiler invocations.
-func parseFilesCompiled(stderr string) int {
+func parseFilesCompiled(stdout string) int {
 	// Look for Ninja progress pattern [N/M] at start of line.
 	ninjaRe := regexp.MustCompile(`^\[(\d+)/\d+\]`)
 	highest := 0
-	for _, line := range strings.Split(stderr, "\n") {
+	for _, line := range strings.Split(stdout, "\n") {
 		if m := ninjaRe.FindStringSubmatch(line); m != nil {
 			n, _ := strconv.Atoi(m[1])
 			if n > highest {
@@ -922,7 +922,7 @@ func parseFilesCompiled(stderr string) int {
 	// Fallback for Make: count compiler invocation lines.
 	compilerRe := regexp.MustCompile(`^\s*(gcc|g\+\+|clang|clang\+\+|cl\.exe|cc|c\+\+)\s`)
 	count := 0
-	for _, line := range strings.Split(stderr, "\n") {
+	for _, line := range strings.Split(stdout, "\n") {
 		if compilerRe.MatchString(line) {
 			count++
 		}

@@ -361,6 +361,39 @@ func TestE2ESuccessfulBuild(t *testing.T) {
 	}
 }
 
+func TestE2EBuildFilesCompiled(t *testing.T) {
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{
+			ExitCode: 0,
+			Stdout:   "[1/4] Building CXX object a.cpp.o\n[2/4] Building CXX object b.cpp.o\n[3/4] Building CXX object c.cpp.o\n[4/4] Linking CXX executable app\n",
+			Stderr:   "",
+			Duration: time.Second,
+		},
+	}
+	env := startE2E(t, fb)
+	defer env.cancel()
+
+	env.store.SetConfigured()
+
+	resp := env.callTool(t, "build", nil)
+	if resp.Error != nil {
+		t.Fatalf("JSON-RPC error: %s", resp.Error.Message)
+	}
+
+	text, isError := toolResultText(t, resp)
+	if isError {
+		t.Fatalf("unexpected tool error: %s", text)
+	}
+
+	var br buildResponse
+	if err := json.Unmarshal([]byte(text), &br); err != nil {
+		t.Fatalf("unmarshal build response: %v", err)
+	}
+	if br.FilesCompiled != 4 {
+		t.Fatalf("expected files_compiled 4, got %d", br.FilesCompiled)
+	}
+}
+
 func TestE2EFailedBuildThenGetErrors(t *testing.T) {
 	clangJSON := `[{"file":"main.cpp","line":10,"column":5,"severity":"error","message":"use of undeclared identifier 'x'","option":"-Werror"},{"file":"main.cpp","line":20,"column":1,"severity":"warning","message":"unused variable 'y'","option":"-Wunused-variable"}]`
 

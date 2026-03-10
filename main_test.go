@@ -214,6 +214,38 @@ func TestBuildToolSuccessfulBuild(t *testing.T) {
 	}
 }
 
+func TestBuildToolFilesCompiledFromStdout(t *testing.T) {
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{
+			ExitCode: 0,
+			Stdout:   "[1/3] Building CXX object main.cpp.o\n[2/3] Building CXX object util.cpp.o\n[3/3] Linking CXX executable app\n",
+			Stderr:   "some warning on stderr\n",
+			Duration: time.Second,
+		},
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp buildResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.FilesCompiled != 3 {
+		t.Fatalf("expected files_compiled 3, got %d", resp.FilesCompiled)
+	}
+}
+
 func TestBuildToolPassesTargetsAndJobs(t *testing.T) {
 	fb := &fakeBuilder{
 		buildResult: &builder.BuildResult{
@@ -1589,8 +1621,8 @@ func TestSuggestFixNearEndOfFile(t *testing.T) {
 // --- parseFilesCompiled tests ---
 
 func TestParseFilesCompiledNinja(t *testing.T) {
-	stderr := "[1/5] Building CXX object main.cpp.o\n[2/5] Building CXX object util.cpp.o\n[3/5] Building CXX object lib.cpp.o\n[4/5] Linking CXX executable app\n[5/5] Finished\n"
-	got := parseFilesCompiled(stderr)
+	stdout := "[1/5] Building CXX object main.cpp.o\n[2/5] Building CXX object util.cpp.o\n[3/5] Building CXX object lib.cpp.o\n[4/5] Linking CXX executable app\n[5/5] Finished\n"
+	got := parseFilesCompiled(stdout)
 	if got != 5 {
 		t.Fatalf("expected 5 files compiled, got %d", got)
 	}
@@ -1604,8 +1636,8 @@ func TestParseFilesCompiledEmpty(t *testing.T) {
 }
 
 func TestParseFilesCompiledMake(t *testing.T) {
-	stderr := "gcc -c -o main.o main.cpp\ng++ -c -o util.o util.cpp\nclang -c -o lib.o lib.cpp\nlinking app\n"
-	got := parseFilesCompiled(stderr)
+	stdout := "gcc -c -o main.o main.cpp\ng++ -c -o util.o util.cpp\nclang -c -o lib.o lib.cpp\nlinking app\n"
+	got := parseFilesCompiled(stdout)
 	if got != 3 {
 		t.Fatalf("expected 3 files compiled, got %d", got)
 	}
@@ -1613,8 +1645,8 @@ func TestParseFilesCompiledMake(t *testing.T) {
 
 func TestParseFilesCompiledNinjaCacheHit(t *testing.T) {
 	// All targets cached — no progress lines.
-	stderr := "ninja: no work to do.\n"
-	got := parseFilesCompiled(stderr)
+	stdout := "ninja: no work to do.\n"
+	got := parseFilesCompiled(stdout)
 	if got != 0 {
 		t.Fatalf("expected 0 files compiled for cache hit, got %d", got)
 	}
