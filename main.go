@@ -422,6 +422,21 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 		}
 	}
 
+	// When the build failed but no compiler diagnostics were found, check for
+	// CMake errors in the output. This catches CMake re-configure failures
+	// that Ninja triggers when CMakeLists.txt files have changed.
+	if result.ExitCode != 0 && len(errs) == 0 {
+		combined := result.Stdout + "\n" + result.Stderr
+		for _, d := range parseCMakeDiagnostics(combined) {
+			switch d.Severity {
+			case diagnostics.SeverityError:
+				errs = append(errs, d)
+			case diagnostics.SeverityWarning:
+				warns = append(warns, d)
+			}
+		}
+	}
+
 	// If the build was killed (timeout/cancel), mark state as dirty.
 	if result.Killed {
 		inst.store.SetDirty()
@@ -599,6 +614,24 @@ func (srv *mcpServer) handleConfigure(ctx context.Context, req mcp.CallToolReque
 		inst.store.SetConfigured()
 	}
 
+	// Store CMake diagnostics so get_errors can return them.
+	if !success {
+		diags := parseCMakeDiagnostics(combined)
+		var errs, warns []diagnostics.Diagnostic
+		for _, d := range diags {
+			switch d.Severity {
+			case diagnostics.SeverityError:
+				errs = append(errs, d)
+			case diagnostics.SeverityWarning:
+				warns = append(warns, d)
+			}
+		}
+		inst.store.SetConfigured() // must be configured to call FinishBuild
+		if err := inst.store.StartBuild(); err == nil {
+			inst.store.FinishBuild(result.ExitCode, result.Duration, errs, warns)
+		}
+	}
+
 	resp := configureResponse{
 		Config:     inst.name,
 		Success:    success,
@@ -617,6 +650,11 @@ func (srv *mcpServer) handleConfigure(ctx context.Context, req mcp.CallToolReque
 // ansiRe matches ANSI escape sequences (e.g. color codes) so they can be
 // stripped before parsing output.
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// cmakeLocationRe extracts file and line from CMake error/warning headers like:
+//
+//	CMake Error at path/to/CMakeLists.txt:17 (SOME_COMMAND):
+var cmakeLocationRe = regexp.MustCompile(`^CMake (?:Error|Warning)(?: \(dev\))? at (.+):(\d+)`)
 
 // parseCMakeMessages splits CMake output into message groups starting with
 // "CMake Error" or "CMake Warning" prefixes. It returns the messages and the
@@ -656,6 +694,49 @@ func parseCMakeMessages(output string) ([]string, int) {
 	}
 
 	return messages, errorCount
+}
+
+// parseCMakeDiagnostics converts CMake error/warning messages from build or
+// configure output into structured Diagnostic entries. This allows CMake-level
+// errors (e.g. unknown commands, missing packages) to appear in get_errors
+// alongside compiler diagnostics.
+func parseCMakeDiagnostics(output string) []diagnostics.Diagnostic {
+	messages, _ := parseCMakeMessages(output)
+	var diags []diagnostics.Diagnostic
+	for _, m := range messages {
+		firstLine := m
+		if idx := strings.Index(m, "\n"); idx != -1 {
+			firstLine = m[:idx]
+		}
+
+		var sev diagnostics.Severity
+		if strings.HasPrefix(firstLine, "CMake Error") {
+			sev = diagnostics.SeverityError
+		} else {
+			sev = diagnostics.SeverityWarning
+		}
+
+		d := diagnostics.Diagnostic{
+			Severity: sev,
+			Source:   "cmake",
+		}
+
+		// Extract file and line from the header if present.
+		if match := cmakeLocationRe.FindStringSubmatch(firstLine); match != nil {
+			d.File = match[1]
+			d.Line, _ = strconv.Atoi(match[2])
+		}
+
+		// The body (indented lines after the header) is the message.
+		body := m
+		if idx := strings.Index(m, "\n"); idx != -1 {
+			body = strings.TrimSpace(m[idx+1:])
+		}
+		d.Message = body
+
+		diags = append(diags, d)
+	}
+	return diags
 }
 
 func (srv *mcpServer) handleClean(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

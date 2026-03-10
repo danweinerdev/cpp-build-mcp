@@ -1,0 +1,21 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "ninja-test",
+      "binaryDir": "${sourceDir}/build/ninja-test",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "make-test",
+      "binaryDir": "${sourceDir}/build/make-test",
+      "generator": "Unix Makefiles",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    }
+  ]
+}

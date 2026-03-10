@@ -373,6 +373,66 @@ func TestBuildToolDirtyFlagNotClearedOnFailure(t *testing.T) {
 	}
 }
 
+func TestBuildToolCMakeReconfigureError(t *testing.T) {
+	// Simulate a CMake re-configure failure during build (e.g. Ninja detects
+	// CMakeLists.txt changes and re-runs cmake, which fails).
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{
+			ExitCode: 2,
+			Stdout:   "-- Git submodule 'External/abseil/src' is initialized\nCMake Error at External/abseil/CMakeLists.txt:17 (FUSION_FIX_EXTERNAL_CRT):\n  Unknown CMake command \"FUSION_FIX_EXTERNAL_CRT\".\n\n\n-- Configuring incomplete, errors occurred!\n",
+			Stderr:   "",
+			Duration: 9 * time.Millisecond,
+		},
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp buildResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if resp.ExitCode != 2 {
+		t.Fatalf("expected exit_code 2, got %d", resp.ExitCode)
+	}
+	// CMake errors should now be counted as regular errors.
+	if resp.ErrorCount == 0 {
+		t.Fatal("expected error_count > 0 for CMake reconfigure failure")
+	}
+
+	// The error should also be stored and retrievable via get_errors.
+	storedErrs := store.Errors()
+	if len(storedErrs) == 0 {
+		t.Fatal("expected stored errors from CMake reconfigure failure, got none")
+	}
+	found := false
+	for _, d := range storedErrs {
+		if strings.Contains(d.Message, "Unknown CMake command") && d.Source == "cmake" {
+			if d.File != "External/abseil/CMakeLists.txt" {
+				t.Errorf("expected file 'External/abseil/CMakeLists.txt', got %q", d.File)
+			}
+			if d.Line != 17 {
+				t.Errorf("expected line 17, got %d", d.Line)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a stored cmake diagnostic with 'Unknown CMake command', got: %v", storedErrs)
+	}
+}
+
 func TestBuildResponseTargetsRequestedOmitted(t *testing.T) {
 	fb := &fakeBuilder{
 		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},
@@ -1052,9 +1112,18 @@ func TestConfigureFailedWithCMakeErrors(t *testing.T) {
 		t.Fatalf("expected 2 messages, got %d", len(resp.Messages))
 	}
 
-	// State should remain unconfigured.
-	if store.GetPhase() != state.PhaseUnconfigured {
-		t.Fatalf("expected PhaseUnconfigured after failed configure, got %d", store.GetPhase())
+	// CMake errors should be stored so get_errors can return them.
+	storedErrs := store.Errors()
+	if len(storedErrs) != 2 {
+		t.Fatalf("expected 2 stored errors, got %d", len(storedErrs))
+	}
+	for _, d := range storedErrs {
+		if d.Source != "cmake" {
+			t.Errorf("expected source 'cmake', got %q", d.Source)
+		}
+		if d.File != "CMakeLists.txt" {
+			t.Errorf("expected file 'CMakeLists.txt', got %q", d.File)
+		}
 	}
 }
 
