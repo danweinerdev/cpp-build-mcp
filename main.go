@@ -614,10 +614,15 @@ func (srv *mcpServer) handleConfigure(ctx context.Context, req mcp.CallToolReque
 	return mcp.NewToolResultText(string(data)), nil
 }
 
+// ansiRe matches ANSI escape sequences (e.g. color codes) so they can be
+// stripped before parsing output.
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
 // parseCMakeMessages splits CMake output into message groups starting with
 // "CMake Error" or "CMake Warning" prefixes. It returns the messages and the
 // count of error messages.
 func parseCMakeMessages(output string) ([]string, int) {
+	output = ansiRe.ReplaceAllString(output, "")
 	lines := strings.Split(output, "\n")
 	var messages []string
 	var current strings.Builder

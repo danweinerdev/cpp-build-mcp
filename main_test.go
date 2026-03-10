@@ -1278,6 +1278,26 @@ func TestParseCMakeMessagesWithErrors(t *testing.T) {
 	}
 }
 
+func TestParseCMakeMessagesWithANSICodes(t *testing.T) {
+	// CMake may emit ANSI color codes when CMAKE_COLOR_DIAGNOSTICS is on or
+	// the environment forces colors. The parser must strip them.
+	output := "\x1b[31mCMake Error at Contrib/Fusion/External/Libraries/abseil/CMakeLists.txt:17 (FUSION_FIX_EXTERNAL_CRT):\x1b[0m\n  Unknown CMake command \"FUSION_FIX_EXTERNAL_CRT\".\n"
+	messages, errorCount := parseCMakeMessages(output)
+	if errorCount != 1 {
+		t.Fatalf("expected 1 error, got %d", errorCount)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(messages))
+	}
+	if !strings.Contains(messages[0], "Unknown CMake command") {
+		t.Fatalf("expected message to contain error text, got: %s", messages[0])
+	}
+	// Verify ANSI codes are stripped from the message text.
+	if strings.Contains(messages[0], "\x1b") {
+		t.Fatalf("message still contains ANSI escape codes: %s", messages[0])
+	}
+}
+
 // --- suggest_fix tests ---
 
 func TestSuggestFixValidIndex(t *testing.T) {
