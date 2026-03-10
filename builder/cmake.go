@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -142,6 +143,90 @@ func (b *CMakeBuilder) Clean(ctx context.Context, targets []string) (*BuildResul
 // implemented with real Ninja target parsing in a later task.
 func (b *CMakeBuilder) ListTargets(ctx context.Context) ([]TargetInfo, error) {
 	return nil, errors.New("not yet implemented")
+}
+
+// internalTargets is the set of CMake-generated targets that should be
+// excluded from user-facing target lists. Lookup is O(1).
+var internalTargets = map[string]bool{
+	"all":                      true,
+	"clean":                    true,
+	"help":                     true,
+	"depend":                   true,
+	"edit_cache":               true,
+	"rebuild_cache":            true,
+	"install":                  true,
+	"install/local":            true,
+	"install/strip":            true,
+	"list_install_components":  true,
+	"package":                  true,
+	"package_source":           true,
+	"test":                     true,
+	"RUN_TESTS":                true,
+	"NightlyMemoryCheck":       true,
+}
+
+// parseTargetList parses the output of `cmake --build <dir> --target help`
+// into a list of user-defined targets, filtering out internal CMake targets.
+// It handles both Ninja and Unix Makefiles generator output formats.
+func parseTargetList(stdout string) []TargetInfo {
+	lines := strings.Split(stdout, "\n")
+
+	// Detect format: if any line starts with "... ", treat as Makefile format.
+	isMakefile := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "... ") {
+			isMakefile = true
+			break
+		}
+	}
+
+	var targets []TargetInfo
+
+	for _, line := range lines {
+		var name string
+		if isMakefile {
+			if !strings.HasPrefix(line, "... ") {
+				continue
+			}
+			// Strip "... " prefix
+			name = strings.TrimPrefix(line, "... ")
+			// Strip parenthetical suffix, e.g. " (the default if no target is provided)"
+			if idx := strings.Index(name, " ("); idx >= 0 {
+				name = name[:idx]
+			}
+		} else {
+			// Ninja format: strip ": phony" or ": PHONY" suffix
+			name = line
+			name = strings.TrimSuffix(name, ": phony")
+			name = strings.TrimSuffix(name, ": PHONY")
+		}
+
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+
+		// Filter: internal targets
+		if internalTargets[name] {
+			continue
+		}
+		// Filter: targets containing "/" (internal CMake directory targets)
+		if strings.Contains(name, "/") {
+			continue
+		}
+		// Filter: object file targets
+		if strings.HasSuffix(name, ".o") || strings.HasSuffix(name, ".obj") {
+			continue
+		}
+
+		targets = append(targets, TargetInfo{Name: name})
+	}
+
+	// Return empty slice, not nil
+	if targets == nil {
+		return []TargetInfo{}
+	}
+	return targets
 }
 
 // generatorCMakeName maps a normalized generator name (as stored in

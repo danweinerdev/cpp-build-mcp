@@ -387,6 +387,93 @@ func TestBuildCleanArgs(t *testing.T) {
 	assertContainsSequence(t, args, "--target", "clean")
 }
 
+func TestParseTargetList(t *testing.T) {
+	t.Run("ninja format", func(t *testing.T) {
+		input := "all\nclean\nhelp\nmyapp\nmylib\nedit_cache\nrebuild_cache\nCMakeFiles/myapp.dir/all\nCMakeFiles/mylib.dir/all\n"
+		result := parseTargetList(input)
+		if len(result) != 2 {
+			t.Fatalf("expected 2 targets, got %d: %v", len(result), result)
+		}
+		if result[0].Name != "myapp" {
+			t.Errorf("expected first target 'myapp', got %q", result[0].Name)
+		}
+		if result[1].Name != "mylib" {
+			t.Errorf("expected second target 'mylib', got %q", result[1].Name)
+		}
+	})
+
+	t.Run("ninja format with phony suffix", func(t *testing.T) {
+		input := "all: phony\nclean: phony\nmyapp: phony\nmylib: PHONY\n"
+		result := parseTargetList(input)
+		if len(result) != 2 {
+			t.Fatalf("expected 2 targets, got %d: %v", len(result), result)
+		}
+		if result[0].Name != "myapp" {
+			t.Errorf("expected first target 'myapp', got %q", result[0].Name)
+		}
+		if result[1].Name != "mylib" {
+			t.Errorf("expected second target 'mylib', got %q", result[1].Name)
+		}
+	})
+
+	t.Run("makefile format", func(t *testing.T) {
+		input := "The following are some of the valid targets for this Makefile:\n... all (the default if no target is provided)\n... clean\n... depend\n... rebuild_cache\n... edit_cache\n... myapp\n... mylib\n... myapp.o\n... mylib.o\n"
+		result := parseTargetList(input)
+		if len(result) != 2 {
+			t.Fatalf("expected 2 targets, got %d: %v", len(result), result)
+		}
+		if result[0].Name != "myapp" {
+			t.Errorf("expected first target 'myapp', got %q", result[0].Name)
+		}
+		if result[1].Name != "mylib" {
+			t.Errorf("expected second target 'mylib', got %q", result[1].Name)
+		}
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		result := parseTargetList("")
+		if result == nil {
+			t.Fatal("expected empty slice, got nil")
+		}
+		if len(result) != 0 {
+			t.Fatalf("expected 0 targets, got %d: %v", len(result), result)
+		}
+	})
+
+	t.Run("all internal targets filtered", func(t *testing.T) {
+		input := "all\nclean\nhelp\ndepend\nedit_cache\nrebuild_cache\ninstall\ntest\n"
+		result := parseTargetList(input)
+		if result == nil {
+			t.Fatal("expected empty slice, got nil")
+		}
+		if len(result) != 0 {
+			t.Fatalf("expected 0 targets, got %d: %v", len(result), result)
+		}
+	})
+
+	t.Run("targets with slash filtered", func(t *testing.T) {
+		input := "myapp\nCMakeFiles/myapp.dir/all\ninstall/local\n"
+		result := parseTargetList(input)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 target, got %d: %v", len(result), result)
+		}
+		if result[0].Name != "myapp" {
+			t.Errorf("expected target 'myapp', got %q", result[0].Name)
+		}
+	})
+
+	t.Run("object file targets filtered", func(t *testing.T) {
+		input := "myapp\nmain.o\nutils.obj\n"
+		result := parseTargetList(input)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 target, got %d: %v", len(result), result)
+		}
+		if result[0].Name != "myapp" {
+			t.Errorf("expected target 'myapp', got %q", result[0].Name)
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Progress notification tests — uses shell scripts, no cmake required
 // ---------------------------------------------------------------------------
