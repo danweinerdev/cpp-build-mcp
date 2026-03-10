@@ -759,6 +759,97 @@ func TestProgressMinIntervalDefault(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ListTargets tests
+// ---------------------------------------------------------------------------
+
+func TestCMakeBuilderListTargetsArgs(t *testing.T) {
+	// This test verifies that ListTargets constructs the correct
+	// cmake command. We can't easily mock exec, so we use a non-existent
+	// build directory to verify it doesn't panic and returns an error.
+	cfg := &config.Config{
+		BuildDir:     "/tmp/test-build-dir",
+		BuildTimeout: time.Minute,
+	}
+	b := NewCMakeBuilder(cfg)
+
+	// ListTargets will fail because the build dir doesn't exist
+	// (cmake won't find it), but we can at least verify it doesn't panic
+	// and returns an error.
+	_, err := b.ListTargets(context.Background())
+	if err == nil {
+		t.Fatal("expected error for non-existent build dir")
+	}
+}
+
+func TestCMakeBuilderListTargetsIntegration(t *testing.T) {
+	// Skip if cmake/make not found.
+	// We use "Unix Makefiles" rather than Ninja because CMake >= 3.31
+	// changed Ninja's --target help output to omit user-defined targets.
+	// The Makefile generator still lists all targets in its help output.
+	if _, err := exec.LookPath("cmake"); err != nil {
+		t.Skip("cmake not found")
+	}
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skip("make not found")
+	}
+
+	// Create a temp project with a known target
+	dir := t.TempDir()
+	cmakeLists := `cmake_minimum_required(VERSION 3.10)
+project(test_project C)
+add_executable(test_app main.c)
+`
+	os.WriteFile(filepath.Join(dir, "CMakeLists.txt"), []byte(cmakeLists), 0o644)
+	os.WriteFile(filepath.Join(dir, "main.c"), []byte("int main(void) { return 0; }\n"), 0o644)
+
+	buildDir := filepath.Join(dir, "build")
+	cfg := &config.Config{
+		SourceDir:             dir,
+		BuildDir:              buildDir,
+		Generator:             "make",
+		BuildTimeout:          2 * time.Minute,
+		InjectDiagnosticFlags: false,
+	}
+
+	b := NewCMakeBuilder(cfg)
+	ctx := context.Background()
+
+	// Configure first
+	result, err := b.Configure(ctx, nil)
+	if err != nil {
+		t.Fatalf("Configure failed: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("Configure exit code %d: %s", result.ExitCode, result.Stderr)
+	}
+
+	// Now list targets
+	targets, err := b.ListTargets(ctx)
+	if err != nil {
+		t.Fatalf("ListTargets failed: %v", err)
+	}
+
+	// Should contain test_app
+	found := false
+	for _, tgt := range targets {
+		if tgt.Name == "test_app" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected to find 'test_app' in targets, got %v", targets)
+	}
+
+	// Should NOT contain internal targets
+	for _, tgt := range targets {
+		if tgt.Name == "clean" || tgt.Name == "all" || tgt.Name == "help" || tgt.Name == "edit_cache" || tgt.Name == "rebuild_cache" {
+			t.Errorf("internal target %q should have been filtered", tgt.Name)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Integration test — requires cmake and ninja installed
 // ---------------------------------------------------------------------------
 

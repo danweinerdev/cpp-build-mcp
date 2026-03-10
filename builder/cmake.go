@@ -139,10 +139,21 @@ func (b *CMakeBuilder) Clean(ctx context.Context, targets []string) (*BuildResul
 	return b.run(ctx, "cmake", args)
 }
 
-// ListTargets returns the list of build targets. This is a stub that will be
-// implemented with real Ninja target parsing in a later task.
+// ListTargets returns the list of build targets by running
+// cmake --build <buildDir> --target help and parsing the output through
+// parseTargetList, which filters out internal CMake targets.
 func (b *CMakeBuilder) ListTargets(ctx context.Context) ([]TargetInfo, error) {
-	return nil, errors.New("not yet implemented")
+	var stdout, stderr bytes.Buffer
+
+	cmd := exec.CommandContext(ctx, "cmake", "--build", b.cfg.BuildDir, "--target", "help")
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("cmake --build --target help failed: %s", stderr.String())
+	}
+
+	return parseTargetList(stdout.String()), nil
 }
 
 // internalTargets is the set of CMake-generated targets that should be
