@@ -13,6 +13,7 @@ import (
 	"github.com/danweinerdev/cpp-build-mcp/builder"
 	"github.com/danweinerdev/cpp-build-mcp/config"
 	"github.com/danweinerdev/cpp-build-mcp/diagnostics"
+	"github.com/danweinerdev/cpp-build-mcp/state"
 )
 
 type progressEvent struct {
@@ -48,6 +49,18 @@ func requireNinja(t *testing.T) {
 	}
 	if _, err := exec.LookPath("ninja"); err != nil {
 		t.Skip("ninja not found")
+	}
+}
+
+// requireMake skips the test if running in short mode or if make is not
+// available on PATH.
+func requireMake(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skip("make not found")
 	}
 }
 
@@ -91,6 +104,17 @@ func requireCMakeMinVersion(t *testing.T, major, minor int) {
 	}
 }
 
+// isRealGCC returns true if the compiler at path is a real GCC, not Apple's
+// clang masquerading as g++ (as on macOS where /usr/bin/g++ is a clang shim).
+func isRealGCC(path string) bool {
+	out, err := exec.Command(path, "--version").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	first := strings.SplitN(string(out), "\n", 2)[0]
+	return !strings.Contains(strings.ToLower(first), "clang")
+}
+
 // toolchainCases returns a slice of toolchainCase for each C++ compiler found
 // on PATH (clang++ and/or g++). Skips the test if neither is found.
 func toolchainCases(t *testing.T) []toolchainCase {
@@ -103,7 +127,7 @@ func toolchainCases(t *testing.T) []toolchainCase {
 			compiler:  path,
 		})
 	}
-	if path, err := exec.LookPath("g++"); err == nil {
+	if path, err := exec.LookPath("g++"); err == nil && isRealGCC(path) {
 		cases = append(cases, toolchainCase{
 			name:      "gcc",
 			toolchain: "gcc",
@@ -123,7 +147,7 @@ func detectToolchain(t *testing.T) toolchainCase {
 	if path, err := exec.LookPath("clang++"); err == nil {
 		return toolchainCase{name: "clang", toolchain: "clang", compiler: path}
 	}
-	if path, err := exec.LookPath("g++"); err == nil {
+	if path, err := exec.LookPath("g++"); err == nil && isRealGCC(path) {
 		return toolchainCase{name: "gcc", toolchain: "gcc", compiler: path}
 	}
 	t.Skip("no C++ compiler found (need clang++ or g++)")
@@ -813,6 +837,459 @@ func TestIntegrationConfigureError(t *testing.T) {
 	if !strings.Contains(result.Stderr, "intentional configure failure") {
 		t.Errorf("configure stderr should contain 'intentional configure failure'")
 		t.Logf("stderr:\n%s", result.Stderr)
+	}
+}
+
+// TestIntegrationConfigureUnknownCommand verifies that parseCMakeMessages
+// captures "Unknown CMake command" errors that occur when a CMakeLists.txt
+// calls a function that doesn't exist (e.g. from a missing include).
+func TestIntegrationConfigureUnknownCommand(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	srcDir := copyFixture(t, "cmake-unknown-command")
+	buildDir := filepath.Join(srcDir, "build")
+
+	cfg := &config.Config{
+		SourceDir:             srcDir,
+		BuildDir:              buildDir,
+		Toolchain:             "auto",
+		Generator:             "ninja",
+		InjectDiagnosticFlags: false,
+		BuildTimeout:          2 * time.Minute,
+	}
+	b := builder.NewCMakeBuilder(cfg)
+	ctx := context.Background()
+
+	// Configure — should fail due to unknown command.
+	result, err := b.Configure(ctx, nil)
+	if err != nil {
+		t.Fatalf("Configure returned error: %v", err)
+	}
+	if result.ExitCode == 0 {
+		t.Fatalf("Configure should have failed but exit code was 0")
+	}
+
+	// Parse through the same path the MCP handler uses.
+	combined := result.Stdout + "\n" + result.Stderr
+	messages, errorCount := parseCMakeMessages(combined)
+
+	t.Logf("stdout:\n%s", result.Stdout)
+	t.Logf("stderr:\n%s", result.Stderr)
+	t.Logf("parsed %d messages (%d errors)", len(messages), errorCount)
+	for i, m := range messages {
+		t.Logf("message[%d]: %s", i, m)
+	}
+
+	if errorCount < 1 {
+		t.Fatalf("expected at least 1 error, got %d", errorCount)
+	}
+
+	// Verify the unknown command error was captured.
+	found := false
+	for _, m := range messages {
+		if strings.Contains(m, "Unknown CMake command") && strings.Contains(m, "FUSION_FIX_EXTERNAL_CRT") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a message containing 'Unknown CMake command' and 'FUSION_FIX_EXTERNAL_CRT'")
+	}
+
+	// Verify parseCMakeDiagnostics produces structured diagnostics with
+	// correct file, line, and message that get_errors would return.
+	diags := parseCMakeDiagnostics(combined)
+	if len(diags) == 0 {
+		t.Fatalf("parseCMakeDiagnostics returned no diagnostics")
+	}
+
+	var cmakeDiag *diagnostics.Diagnostic
+	for i := range diags {
+		if diags[i].Severity == diagnostics.SeverityError && strings.Contains(diags[i].Message, "Unknown CMake command") {
+			cmakeDiag = &diags[i]
+			break
+		}
+	}
+	if cmakeDiag == nil {
+		t.Fatalf("no structured diagnostic with 'Unknown CMake command' found, got: %+v", diags)
+	}
+	if cmakeDiag.Source != "cmake" {
+		t.Errorf("expected source 'cmake', got %q", cmakeDiag.Source)
+	}
+	if !strings.HasSuffix(cmakeDiag.File, "CMakeLists.txt") {
+		t.Errorf("expected file ending in CMakeLists.txt, got %q", cmakeDiag.File)
+	}
+	if cmakeDiag.Line != 3 {
+		t.Errorf("expected line 3, got %d", cmakeDiag.Line)
+	}
+	t.Logf("structured diagnostic: file=%s line=%d severity=%s source=%s message=%s",
+		cmakeDiag.File, cmakeDiag.Line, cmakeDiag.Severity, cmakeDiag.Source, cmakeDiag.Message)
+}
+
+// TestIntegrationBuildCMakeReconfigureError verifies that when Ninja triggers
+// a CMake re-configure during build and it fails (e.g. a CMakeLists.txt was
+// modified to call an unknown function), the error is captured as a structured
+// diagnostic and stored so get_errors can return it.
+func TestIntegrationBuildCMakeReconfigureError(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	tc := detectToolchain(t)
+	srcDir := copyFixture(t, "cmake-library")
+	buildDir := filepath.Join(srcDir, "build")
+
+	cfg := &config.Config{
+		SourceDir:             srcDir,
+		BuildDir:              buildDir,
+		Toolchain:             tc.toolchain,
+		Generator:             "ninja",
+		InjectDiagnosticFlags: false,
+		BuildTimeout:          2 * time.Minute,
+	}
+	b := builder.NewCMakeBuilder(cfg)
+	ctx := context.Background()
+
+	cCompiler := deriveCCompiler(t, tc.compiler, tc.toolchain)
+	extraArgs := []string{
+		"-DCMAKE_CXX_COMPILER=" + tc.compiler,
+		"-DCMAKE_C_COMPILER=" + cCompiler,
+	}
+
+	// Step 1: Configure and build successfully.
+	result, err := b.Configure(ctx, extraArgs)
+	if err != nil {
+		t.Fatalf("Configure returned error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("Configure failed (exit %d):\nstdout:\n%s\nstderr:\n%s", result.ExitCode, result.Stdout, result.Stderr)
+	}
+
+	result, err = b.Build(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("Initial build failed (exit %d):\nstdout:\n%s\nstderr:\n%s", result.ExitCode, result.Stdout, result.Stderr)
+	}
+
+	// Step 2: Break the CMakeLists.txt by adding an unknown command.
+	cmakePath := filepath.Join(srcDir, "CMakeLists.txt")
+	original, err := os.ReadFile(cmakePath)
+	if err != nil {
+		t.Fatalf("failed to read CMakeLists.txt: %v", err)
+	}
+	broken := strings.Replace(string(original),
+		"add_executable(main main.cpp)",
+		"FUSION_FIX_EXTERNAL_CRT()\nadd_executable(main main.cpp)",
+		1)
+	if err := os.WriteFile(cmakePath, []byte(broken), 0644); err != nil {
+		t.Fatalf("failed to write broken CMakeLists.txt: %v", err)
+	}
+
+	// Step 3: Build again — Ninja should detect the CMakeLists.txt change,
+	// trigger a re-configure, and fail.
+	result, err = b.Build(ctx, nil, 0)
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	if result.ExitCode == 0 {
+		t.Fatalf("Build should have failed after breaking CMakeLists.txt")
+	}
+
+	t.Logf("build exit code: %d", result.ExitCode)
+	t.Logf("stdout:\n%s", result.Stdout)
+	t.Logf("stderr:\n%s", result.Stderr)
+
+	// Step 4: Verify parseCMakeDiagnostics extracts the error — this is the
+	// same code path the build handler uses before calling FinishBuild.
+	combined := result.Stdout + "\n" + result.Stderr
+	diags := parseCMakeDiagnostics(combined)
+
+	if len(diags) == 0 {
+		t.Fatalf("parseCMakeDiagnostics returned no diagnostics from build output")
+	}
+
+	var cmakeDiag *diagnostics.Diagnostic
+	for i := range diags {
+		if diags[i].Severity == diagnostics.SeverityError && strings.Contains(diags[i].Message, "Unknown CMake command") {
+			cmakeDiag = &diags[i]
+			break
+		}
+	}
+	if cmakeDiag == nil {
+		t.Fatalf("no cmake error diagnostic found, got: %+v", diags)
+	}
+	if cmakeDiag.Source != "cmake" {
+		t.Errorf("expected source 'cmake', got %q", cmakeDiag.Source)
+	}
+	if !strings.HasSuffix(cmakeDiag.File, "CMakeLists.txt") {
+		t.Errorf("expected file ending in CMakeLists.txt, got %q", cmakeDiag.File)
+	}
+	if cmakeDiag.Line == 0 {
+		t.Errorf("expected non-zero line number")
+	}
+
+	// Step 5: Simulate what the build handler does — store the diagnostics
+	// and verify they're retrievable (same path as get_errors).
+	store := state.NewStore()
+	store.SetConfigured()
+	if err := store.StartBuild(); err != nil {
+		t.Fatalf("StartBuild: %v", err)
+	}
+	var storeErrs []diagnostics.Diagnostic
+	for _, d := range diags {
+		if d.Severity == diagnostics.SeverityError {
+			storeErrs = append(storeErrs, d)
+		}
+	}
+	store.FinishBuild(result.ExitCode, result.Duration, storeErrs, nil)
+
+	retrieved := store.Errors()
+	if len(retrieved) == 0 {
+		t.Fatalf("store.Errors() returned nothing after FinishBuild with cmake diagnostics")
+	}
+	found := false
+	for _, d := range retrieved {
+		if d.Source == "cmake" && strings.Contains(d.Message, "FUSION_FIX_EXTERNAL_CRT") {
+			found = true
+			t.Logf("get_errors would return: file=%s line=%d severity=%s source=%s message=%s",
+				d.File, d.Line, d.Severity, d.Source, d.Message)
+			break
+		}
+	}
+	if !found {
+		t.Errorf("store.Errors() did not contain the expected cmake diagnostic, got: %+v", retrieved)
+	}
+}
+
+// presetGeneratorCase defines a generator subtest for preset-based integration tests.
+type presetGeneratorCase struct {
+	name      string // subtest name
+	generator string // "ninja" or "make"
+	preset    string // preset name in CMakePresets.json
+}
+
+// presetGeneratorCases returns subtests for both Ninja and Unix Makefiles generators.
+func presetGeneratorCases(t *testing.T) []presetGeneratorCase {
+	t.Helper()
+	var cases []presetGeneratorCase
+	if _, err := exec.LookPath("ninja"); err == nil {
+		cases = append(cases, presetGeneratorCase{name: "ninja", generator: "ninja", preset: "ninja-test"})
+	}
+	if _, err := exec.LookPath("make"); err == nil {
+		cases = append(cases, presetGeneratorCase{name: "make", generator: "make", preset: "make-test"})
+	}
+	if len(cases) == 0 {
+		t.Skip("no build tool found (need ninja or make)")
+	}
+	return cases
+}
+
+// TestIntegrationPresetConfigureError verifies that CMake configure errors are
+// captured as structured diagnostics for both Ninja and Makefiles generators
+// when using presets.
+func TestIntegrationPresetConfigureError(t *testing.T) {
+	requireCMake(t)
+	requireCMakeMinVersion(t, 3, 21)
+
+	tc := detectToolchain(t)
+
+	for _, gc := range presetGeneratorCases(t) {
+		t.Run(gc.name, func(t *testing.T) {
+			srcDir := copyFixture(t, "cmake-presets-error")
+			buildDir := filepath.Join(srcDir, "build", gc.preset)
+
+			cfg := &config.Config{
+				SourceDir:             srcDir,
+				BuildDir:              buildDir,
+				Toolchain:             tc.toolchain,
+				Generator:             gc.generator,
+				Preset:                gc.preset,
+				InjectDiagnosticFlags: false,
+				BuildTimeout:          2 * time.Minute,
+			}
+			b := builder.NewCMakeBuilder(cfg)
+			ctx := context.Background()
+
+			cCompiler := deriveCCompiler(t, tc.compiler, tc.toolchain)
+			extraArgs := []string{
+				"-DCMAKE_CXX_COMPILER=" + tc.compiler,
+				"-DCMAKE_C_COMPILER=" + cCompiler,
+				"-S", srcDir,
+			}
+
+			// Configure — should fail due to unknown command.
+			result, err := b.Configure(ctx, extraArgs)
+			if err != nil {
+				t.Fatalf("Configure returned error: %v", err)
+			}
+			if result.ExitCode == 0 {
+				t.Fatalf("Configure should have failed but exit code was 0")
+			}
+
+			t.Logf("exit code: %d", result.ExitCode)
+
+			// Verify parseCMakeDiagnostics extracts the error.
+			combined := result.Stdout + "\n" + result.Stderr
+			diags := parseCMakeDiagnostics(combined)
+			if len(diags) == 0 {
+				t.Fatalf("parseCMakeDiagnostics returned no diagnostics\nstdout:\n%s\nstderr:\n%s", result.Stdout, result.Stderr)
+			}
+
+			var found bool
+			for _, d := range diags {
+				if d.Severity == diagnostics.SeverityError &&
+					strings.Contains(d.Message, "Unknown CMake command") &&
+					d.Source == "cmake" &&
+					strings.HasSuffix(d.File, "CMakeLists.txt") {
+					found = true
+					t.Logf("diagnostic: file=%s line=%d severity=%s source=%s message=%s",
+						d.File, d.Line, d.Severity, d.Source, d.Message)
+				}
+			}
+			if !found {
+				t.Errorf("no cmake error diagnostic found with file/line/source, got: %+v", diags)
+			}
+
+			// Verify the diagnostics are stored correctly (same path as get_errors).
+			store := state.NewStore()
+			store.SetConfigured()
+			if err := store.StartBuild(); err != nil {
+				t.Fatalf("StartBuild: %v", err)
+			}
+			var storeErrs []diagnostics.Diagnostic
+			for _, d := range diags {
+				if d.Severity == diagnostics.SeverityError {
+					storeErrs = append(storeErrs, d)
+				}
+			}
+			store.FinishBuild(result.ExitCode, result.Duration, storeErrs, nil)
+
+			retrieved := store.Errors()
+			if len(retrieved) == 0 {
+				t.Fatalf("store.Errors() returned nothing after storing cmake diagnostics")
+			}
+		})
+	}
+}
+
+// TestIntegrationPresetBuildReconfigureError verifies that when a build triggers
+// a CMake re-configure that fails, the error is captured as a structured
+// diagnostic for both Ninja and Makefiles generators.
+func TestIntegrationPresetBuildReconfigureError(t *testing.T) {
+	requireCMake(t)
+	requireCMakeMinVersion(t, 3, 21)
+
+	tc := detectToolchain(t)
+
+	for _, gc := range presetGeneratorCases(t) {
+		t.Run(gc.name, func(t *testing.T) {
+			srcDir := copyFixture(t, "cmake-presets-library")
+			buildDir := filepath.Join(srcDir, "build", gc.preset)
+
+			cfg := &config.Config{
+				SourceDir:             srcDir,
+				BuildDir:              buildDir,
+				Toolchain:             tc.toolchain,
+				Generator:             gc.generator,
+				Preset:                gc.preset,
+				InjectDiagnosticFlags: false,
+				BuildTimeout:          2 * time.Minute,
+			}
+			b := builder.NewCMakeBuilder(cfg)
+			ctx := context.Background()
+
+			cCompiler := deriveCCompiler(t, tc.compiler, tc.toolchain)
+			extraArgs := []string{
+				"-DCMAKE_CXX_COMPILER=" + tc.compiler,
+				"-DCMAKE_C_COMPILER=" + cCompiler,
+				"-S", srcDir,
+			}
+
+			// Step 1: Configure and build successfully.
+			result, err := b.Configure(ctx, extraArgs)
+			if err != nil {
+				t.Fatalf("Configure returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Configure failed (exit %d):\nstdout:\n%s\nstderr:\n%s", result.ExitCode, result.Stdout, result.Stderr)
+			}
+
+			result, err = b.Build(ctx, nil, 0)
+			if err != nil {
+				t.Fatalf("Build returned error: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("Initial build failed (exit %d):\nstdout:\n%s\nstderr:\n%s", result.ExitCode, result.Stdout, result.Stderr)
+			}
+
+			// Step 2: Break the CMakeLists.txt.
+			cmakePath := filepath.Join(srcDir, "CMakeLists.txt")
+			original, err := os.ReadFile(cmakePath)
+			if err != nil {
+				t.Fatalf("failed to read CMakeLists.txt: %v", err)
+			}
+			broken := strings.Replace(string(original),
+				"add_executable(main main.cpp)",
+				"FUSION_FIX_EXTERNAL_CRT()\nadd_executable(main main.cpp)",
+				1)
+			if err := os.WriteFile(cmakePath, []byte(broken), 0644); err != nil {
+				t.Fatalf("failed to write broken CMakeLists.txt: %v", err)
+			}
+
+			// Step 3: Build again — should trigger a re-configure that fails.
+			result, err = b.Build(ctx, nil, 0)
+			if err != nil {
+				t.Fatalf("Build returned error: %v", err)
+			}
+			if result.ExitCode == 0 {
+				t.Fatalf("Build should have failed after breaking CMakeLists.txt")
+			}
+
+			t.Logf("build exit code: %d", result.ExitCode)
+
+			// Step 4: Verify diagnostics are extracted.
+			combined := result.Stdout + "\n" + result.Stderr
+			diags := parseCMakeDiagnostics(combined)
+
+			if len(diags) == 0 {
+				t.Fatalf("parseCMakeDiagnostics returned no diagnostics\nstdout:\n%s\nstderr:\n%s", result.Stdout, result.Stderr)
+			}
+
+			var found bool
+			for _, d := range diags {
+				if d.Severity == diagnostics.SeverityError &&
+					strings.Contains(d.Message, "Unknown CMake command") &&
+					d.Source == "cmake" {
+					found = true
+					t.Logf("diagnostic: file=%s line=%d severity=%s source=%s message=%s",
+						d.File, d.Line, d.Severity, d.Source, d.Message)
+				}
+			}
+			if !found {
+				t.Errorf("no cmake error diagnostic with 'Unknown CMake command' found, got: %+v", diags)
+			}
+
+			// Step 5: Verify store integration (get_errors path).
+			store := state.NewStore()
+			store.SetConfigured()
+			if err := store.StartBuild(); err != nil {
+				t.Fatalf("StartBuild: %v", err)
+			}
+			var storeErrs []diagnostics.Diagnostic
+			for _, d := range diags {
+				if d.Severity == diagnostics.SeverityError {
+					storeErrs = append(storeErrs, d)
+				}
+			}
+			store.FinishBuild(result.ExitCode, result.Duration, storeErrs, nil)
+
+			retrieved := store.Errors()
+			if len(retrieved) == 0 {
+				t.Fatalf("store.Errors() returned nothing after storing cmake diagnostics")
+			}
+		})
 	}
 }
 
