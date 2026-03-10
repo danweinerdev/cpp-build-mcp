@@ -44,6 +44,10 @@ type fakeBuilder struct {
 
 	// Set to true when Configure is called.
 	configureCalled bool
+
+	// ListTargets return values.
+	listTargetsResult []builder.TargetInfo
+	listTargetsErr    error
 }
 
 func (f *fakeBuilder) Configure(_ context.Context, args []string) (*builder.BuildResult, error) {
@@ -79,7 +83,10 @@ func (f *fakeBuilder) Clean(_ context.Context, targets []string) (*builder.Build
 }
 
 func (f *fakeBuilder) ListTargets(_ context.Context) ([]builder.TargetInfo, error) {
-	return nil, nil
+	if f.listTargetsErr != nil {
+		return nil, f.listTargetsErr
+	}
+	return f.listTargetsResult, nil
 }
 
 func (f *fakeBuilder) SetDirty(dirty bool) { f.lastDirtySet = dirty }
@@ -2735,6 +2742,98 @@ func TestBuildGraphTwoConfigsDifferentBuildDirs(t *testing.T) {
 }
 
 // extractText extracts the text content from a CallToolResult.
+func TestListTargetsSuccess(t *testing.T) {
+	fb := &fakeBuilder{
+		listTargetsResult: []builder.TargetInfo{
+			{Name: "myapp"},
+			{Name: "mylib"},
+			{Name: "tests"},
+		},
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleListTargets(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp listTargetsResponse
+	if err := json.Unmarshal([]byte(extractText(t, result)), &resp); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if resp.Count != 3 {
+		t.Fatalf("expected count 3, got %d", resp.Count)
+	}
+	if resp.Targets[0].Name != "myapp" {
+		t.Fatalf("expected first target 'myapp', got %q", resp.Targets[0].Name)
+	}
+}
+
+func TestListTargetsUnconfigured(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv, _ := newTestServer(fb)
+	// Do NOT call SetConfigured
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleListTargets(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected tool error when unconfigured")
+	}
+	text := extractText(t, result)
+	if !strings.Contains(text, "not configured") {
+		t.Fatalf("expected 'not configured' in error, got %q", text)
+	}
+}
+
+func TestListTargetsBuildInProgress(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+	store.StartBuild() // Mark build as in progress
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleListTargets(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected tool error when build in progress")
+	}
+	text := extractText(t, result)
+	if !strings.Contains(text, "in progress") || !strings.Contains(text, "Build") {
+		t.Fatalf("expected 'Build in progress' in error, got %q", text)
+	}
+}
+
+func TestListTargetsNotSupported(t *testing.T) {
+	fb := &fakeBuilder{
+		listTargetsErr: builder.ErrTargetsNotSupported,
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleListTargets(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected tool error for unsupported")
+	}
+	text := extractText(t, result)
+	if !strings.Contains(text, "not supported") {
+		t.Fatalf("expected 'not supported' in error, got %q", text)
+	}
+}
+
 func extractText(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()
 	if len(result.Content) == 0 {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -152,6 +153,14 @@ func main() {
 		srv.handleListConfigs,
 	)
 
+	s.AddTool(
+		mcp.NewTool("list_targets",
+			mcp.WithDescription("List available build targets for the project."),
+			mcp.WithString("config", mcp.Description("Configuration name (omit for default)")),
+		),
+		srv.handleListTargets,
+	)
+
 	s.AddResource(
 		mcp.NewResource("build://health", "Build Health",
 			mcp.WithResourceDescription("One-line summary of build system state"),
@@ -235,6 +244,13 @@ type suggestFixResponse struct {
 	Diagnostic diagnosticEntry `json:"diagnostic"`
 }
 
+// listTargetsResponse is the JSON structure returned by the list_targets tool.
+type listTargetsResponse struct {
+	Config  string             `json:"config"`
+	Targets []builder.TargetInfo `json:"targets"`
+	Count   int                `json:"count"`
+}
+
 // diagnosticEntry represents a single diagnostic in the get_errors response.
 // Fields with omitempty are excluded when empty, matching the Diagnostic struct
 // convention.
@@ -278,6 +294,42 @@ func (srv *mcpServer) handleListConfigs(_ context.Context, _ mcp.CallToolRequest
 	data, err := json.Marshal(resp)
 	if err != nil {
 		return mcp.NewToolResultError("failed to marshal response: " + err.Error()), nil
+	}
+
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+func (srv *mcpServer) handleListTargets(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	inst, err := srv.resolveConfig(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	if inst.store.GetPhase() < state.PhaseConfigured {
+		return mcp.NewToolResultError("Project not configured. Call configure() first."), nil
+	}
+
+	if inst.store.IsBuilding() {
+		return mcp.NewToolResultError("Build in progress. Wait for the current build to complete."), nil
+	}
+
+	targets, err := inst.builder.ListTargets(ctx)
+	if err != nil {
+		if errors.Is(err, builder.ErrTargetsNotSupported) {
+			return mcp.NewToolResultError("Target listing is not supported for Make projects. Use CMake for target-aware builds."), nil
+		}
+		return mcp.NewToolResultError("failed to list targets: " + err.Error()), nil
+	}
+
+	resp := listTargetsResponse{
+		Config:  inst.name,
+		Targets: targets,
+		Count:   len(targets),
+	}
+
+	data, marshalErr := json.Marshal(resp)
+	if marshalErr != nil {
+		return mcp.NewToolResultError("failed to marshal response: " + marshalErr.Error()), nil
 	}
 
 	return mcp.NewToolResultText(string(data)), nil
