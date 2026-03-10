@@ -116,7 +116,6 @@ func main() {
 		mcp.NewTool("clean",
 			mcp.WithDescription("Clean build artifacts."),
 			mcp.WithString("config", mcp.Description("Configuration name (omit for default)")),
-			mcp.WithArray("targets", mcp.WithStringItems(), mcp.Description("Specific targets to clean. If empty, cleans all.")),
 		),
 		srv.handleClean,
 	)
@@ -182,12 +181,13 @@ type listConfigsResponse struct {
 
 // buildResponse is the JSON structure returned by the build tool.
 type buildResponse struct {
-	Config        string `json:"config"`
-	ExitCode      int    `json:"exit_code"`
-	ErrorCount    int    `json:"error_count"`
-	WarningCount  int    `json:"warning_count"`
-	DurationMs    int64  `json:"duration_ms"`
-	FilesCompiled int    `json:"files_compiled"`
+	Config           string   `json:"config"`
+	ExitCode         int      `json:"exit_code"`
+	ErrorCount       int      `json:"error_count"`
+	WarningCount     int      `json:"warning_count"`
+	DurationMs       int64    `json:"duration_ms"`
+	FilesCompiled    int      `json:"files_compiled"`
+	TargetsRequested []string `json:"targets_requested,omitempty"`
 }
 
 // getErrorsResponse is the JSON structure returned by the get_errors tool.
@@ -437,12 +437,13 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 
 	// Build the response.
 	resp := buildResponse{
-		Config:        inst.name,
-		ExitCode:      result.ExitCode,
-		ErrorCount:    len(errs),
-		WarningCount:  len(warns),
-		DurationMs:    result.Duration.Milliseconds(),
-		FilesCompiled: parseFilesCompiled(result.Stderr),
+		Config:           inst.name,
+		ExitCode:         result.ExitCode,
+		ErrorCount:       len(errs),
+		WarningCount:     len(warns),
+		DurationMs:       result.Duration.Milliseconds(),
+		FilesCompiled:    parseFilesCompiled(result.Stderr),
+		TargetsRequested: targets,
 	}
 
 	data, marshalErr := json.Marshal(resp)
@@ -658,19 +659,11 @@ func (srv *mcpServer) handleClean(ctx context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	// Extract optional targets parameter.
-	var targets []string
-	if rawTargets, ok := req.GetArguments()["targets"]; ok {
-		if arr, ok := rawTargets.([]interface{}); ok {
-			for _, item := range arr {
-				if s, ok := item.(string); ok {
-					targets = append(targets, s)
-				}
-			}
-		}
+	if inst.store.GetPhase() < state.PhaseConfigured {
+		return mcp.NewToolResultError("Project not configured. Call configure() first."), nil
 	}
 
-	result, cleanErr := inst.builder.Clean(ctx, targets)
+	result, cleanErr := inst.builder.Clean(ctx, nil)
 	if cleanErr != nil {
 		return mcp.NewToolResultError("clean failed: " + cleanErr.Error()), nil
 	}

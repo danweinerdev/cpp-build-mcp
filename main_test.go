@@ -373,6 +373,58 @@ func TestBuildToolDirtyFlagNotClearedOnFailure(t *testing.T) {
 	}
 }
 
+func TestBuildResponseTargetsRequestedOmitted(t *testing.T) {
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	// Build with no targets — targets_requested should be omitted from JSON.
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	text := extractText(t, result)
+	if strings.Contains(text, "targets_requested") {
+		t.Fatalf("expected targets_requested to be omitted, got %s", text)
+	}
+}
+
+func TestBuildResponseTargetsRequestedPresent(t *testing.T) {
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	// Build with specific targets — targets_requested should appear.
+	req := makeCallToolRequest(map[string]interface{}{
+		"targets": []interface{}{"app"},
+	})
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	var resp buildResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if len(resp.TargetsRequested) != 1 || resp.TargetsRequested[0] != "app" {
+		t.Fatalf("expected targets_requested=[app], got %v", resp.TargetsRequested)
+	}
+}
+
 func TestGetErrorsNoErrors(t *testing.T) {
 	fb := &fakeBuilder{}
 	srv, _ := newTestServer(fb)
@@ -1102,11 +1154,32 @@ func TestCleanWhenNotBuilt(t *testing.T) {
 	}
 }
 
+func TestCleanUnconfiguredReturnsError(t *testing.T) {
+	fb := &fakeBuilder{
+		cleanResult: &builder.BuildResult{ExitCode: 0},
+	}
+	srv, _ := newTestServer(fb)
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleClean(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected tool error when project not configured")
+	}
+	text := extractText(t, result)
+	if !strings.Contains(text, "not configured") {
+		t.Fatalf("expected 'not configured' message, got %q", text)
+	}
+}
+
 func TestCleanFailure(t *testing.T) {
 	fb := &fakeBuilder{
 		cleanErr: context.DeadlineExceeded,
 	}
-	srv, _ := newTestServer(fb)
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleClean(context.Background(), req)
@@ -2459,7 +2532,8 @@ func TestCleanResponseContainsConfigField(t *testing.T) {
 	fb := &fakeBuilder{
 		cleanResult: &builder.BuildResult{ExitCode: 0},
 	}
-	srv, _ := newTestServer(fb)
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
 
 	req := makeCallToolRequest(nil)
 	result, err := srv.handleClean(context.Background(), req)
