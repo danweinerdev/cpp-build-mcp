@@ -79,10 +79,11 @@ func main() {
 
 	s.AddTool(
 		mcp.NewTool("build",
-			mcp.WithDescription("Build the C/C++ project using CMake."),
+			mcp.WithDescription("Build the C/C++ project using CMake. Set reconfigure to re-run CMake configure before building."),
 			mcp.WithString("config", mcp.Description("Configuration name (omit for default)")),
 			mcp.WithArray("targets", mcp.WithStringItems(), mcp.Description("Build targets to compile. If empty, builds the default target.")),
 			mcp.WithNumber("jobs", mcp.Description("Number of parallel build jobs. 0 uses the build system default.")),
+			mcp.WithBoolean("reconfigure", mcp.Description("Re-run CMake configure before building.")),
 		),
 		srv.handleBuild,
 	)
@@ -401,6 +402,30 @@ func (srv *mcpServer) handleBuild(ctx context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
+	// If reconfigure is requested, run cmake configure before building.
+	// This must happen BEFORE StartBuild because StartBuild requires
+	// PhaseConfigured. On an unconfigured project, reconfigure=true
+	// auto-configures first so that StartBuild succeeds.
+	if req.GetBool("reconfigure", false) {
+		stepResult, stepErr := runConfigureStep(ctx, inst, inst.cfg.CMakeArgs)
+		if stepErr != nil {
+			return mcp.NewToolResultError(stepErr.Error()), nil
+		}
+		if !stepResult.success {
+			resp := configureResponse{
+				Config:     inst.name,
+				Success:    false,
+				ErrorCount: stepResult.errorCount,
+				Messages:   stepResult.messages,
+			}
+			data, marshalErr := json.Marshal(resp)
+			if marshalErr != nil {
+				return mcp.NewToolResultError("failed to marshal response: " + marshalErr.Error()), nil
+			}
+			return mcp.NewToolResultText(string(data)), nil
+		}
+	}
+
 	// Check if build can start (validates configured state and no build in progress).
 	if err := inst.store.StartBuild(); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
@@ -642,27 +667,19 @@ func (srv *mcpServer) handleGetWarnings(_ context.Context, req mcp.CallToolReque
 	return mcp.NewToolResultText(string(data)), nil
 }
 
-func (srv *mcpServer) handleConfigure(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	inst, err := srv.resolveConfig(req)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
+// configureStepResult holds the output of a cmake configure step.
+type configureStepResult struct {
+	success    bool
+	messages   []string
+	errorCount int
+}
 
-	// Extract optional cmake_args parameter.
-	var args []string
-	if rawArgs, ok := req.GetArguments()["cmake_args"]; ok {
-		if arr, ok := rawArgs.([]interface{}); ok {
-			for _, item := range arr {
-				if s, ok := item.(string); ok {
-					args = append(args, s)
-				}
-			}
-		}
-	}
-
-	result, configErr := inst.builder.Configure(ctx, args)
+// runConfigureStep runs cmake configure for the given instance, parses output,
+// updates store state, and returns structured results.
+func runConfigureStep(ctx context.Context, inst *configInstance, extraArgs []string) (configureStepResult, error) {
+	result, configErr := inst.builder.Configure(ctx, extraArgs)
 	if configErr != nil {
-		return mcp.NewToolResultError("configure failed to start: " + configErr.Error()), nil
+		return configureStepResult{}, fmt.Errorf("configure failed to start: %w", configErr)
 	}
 
 	// Parse CMake output for error/warning messages.
@@ -692,11 +709,41 @@ func (srv *mcpServer) handleConfigure(ctx context.Context, req mcp.CallToolReque
 		}
 	}
 
+	return configureStepResult{
+		success:    success,
+		messages:   messages,
+		errorCount: errorCount,
+	}, nil
+}
+
+func (srv *mcpServer) handleConfigure(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	inst, err := srv.resolveConfig(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// Extract optional cmake_args parameter.
+	var args []string
+	if rawArgs, ok := req.GetArguments()["cmake_args"]; ok {
+		if arr, ok := rawArgs.([]interface{}); ok {
+			for _, item := range arr {
+				if s, ok := item.(string); ok {
+					args = append(args, s)
+				}
+			}
+		}
+	}
+
+	stepResult, stepErr := runConfigureStep(ctx, inst, args)
+	if stepErr != nil {
+		return mcp.NewToolResultError(stepErr.Error()), nil
+	}
+
 	resp := configureResponse{
 		Config:     inst.name,
-		Success:    success,
-		ErrorCount: errorCount,
-		Messages:   messages,
+		Success:    stepResult.success,
+		ErrorCount: stepResult.errorCount,
+		Messages:   stepResult.messages,
 	}
 
 	data, marshalErr := json.Marshal(resp)
