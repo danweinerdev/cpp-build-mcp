@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -13,10 +14,11 @@ import (
 
 // configInstance groups the per-configuration dependencies.
 type configInstance struct {
-	name    string
-	cfg     *config.Config
-	builder builder.Builder
-	store   *state.Store
+	name        string
+	cfg         *config.Config
+	originalCfg config.Config // config as loaded from disk, before resolveToolchain mutation
+	builder     builder.Builder
+	store       *state.Store
 }
 
 // ConfigSummary is the JSON-serializable summary of a configuration.
@@ -125,6 +127,100 @@ func (r *configRegistry) all() []*configInstance {
 		out[i] = r.instances[n]
 	}
 	return out
+}
+
+// reloadResult describes what changed during a registry reload.
+type reloadResult struct {
+	Added     []string
+	Removed   []string
+	Changed   []string
+	Unchanged []string
+}
+
+// reload replaces the registry contents based on freshly loaded configs.
+//
+// For each config name it compares the incoming config against the existing
+// instance's originalCfg (the config as loaded from disk, before any
+// resolveToolchain mutation). Unchanged configs preserve their existing
+// configInstance (builder + store state). Changed or new configs get a fresh
+// builder (via builderFactory) and a fresh state.Store. Removed configs are
+// dropped from the registry.
+//
+// If the current default config is removed, dflt is set to defaultName.
+func (r *configRegistry) reload(
+	configs map[string]*config.Config,
+	defaultName string,
+	builderFactory func(*config.Config) (builder.Builder, error),
+) (reloadResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var result reloadResult
+
+	// Build the new instances map.
+	newInstances := make(map[string]*configInstance, len(configs))
+
+	// Process configs in sorted order for deterministic result slices.
+	names := make([]string, 0, len(configs))
+	for name := range configs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		cfg := configs[name]
+
+		if existing, ok := r.instances[name]; ok {
+			// Compare against the original (pre-mutation) config.
+			if reflect.DeepEqual(existing.originalCfg, *cfg) {
+				// Unchanged: preserve existing instance.
+				newInstances[name] = existing
+				result.Unchanged = append(result.Unchanged, name)
+				continue
+			}
+			// Changed: create fresh instance.
+			result.Changed = append(result.Changed, name)
+		} else {
+			// New config.
+			result.Added = append(result.Added, name)
+		}
+
+		// Create fresh builder and store for new/changed configs.
+		b, err := builderFactory(cfg)
+		if err != nil {
+			return reloadResult{}, fmt.Errorf("creating builder for config %q: %w", name, err)
+		}
+		newInstances[name] = &configInstance{
+			name:        name,
+			cfg:         cfg,
+			originalCfg: *cfg,
+			builder:     b,
+			store:       state.NewStore(),
+		}
+	}
+
+	// Detect removed configs (in old but not in new).
+	oldNames := make([]string, 0, len(r.instances))
+	for name := range r.instances {
+		oldNames = append(oldNames, name)
+	}
+	sort.Strings(oldNames)
+
+	for _, name := range oldNames {
+		if _, ok := newInstances[name]; !ok {
+			result.Removed = append(result.Removed, name)
+		}
+	}
+
+	// Replace registry contents.
+	r.instances = newInstances
+
+	// Update default: if the old default was removed, use the provided defaultName.
+	if _, ok := newInstances[r.dflt]; !ok {
+		r.dflt = defaultName
+	}
+
+	return result, nil
 }
 
 // storeStatusToken maps a Store's state to a compact status token.

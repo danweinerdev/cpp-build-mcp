@@ -59,10 +59,11 @@ func main() {
 		}
 
 		inst := &configInstance{
-			name:    name,
-			cfg:     cfg,
-			builder: b,
-			store:   state.NewStore(),
+			name:        name,
+			cfg:         cfg,
+			originalCfg: *cfg,
+			builder:     b,
+			store:       state.NewStore(),
 		}
 		registry.add(inst)
 	}
