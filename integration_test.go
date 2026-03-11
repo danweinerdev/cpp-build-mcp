@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/danweinerdev/cpp-build-mcp/builder"
 	"github.com/danweinerdev/cpp-build-mcp/config"
@@ -1458,6 +1461,277 @@ func TestIntegrationTargetBuild(t *testing.T) {
 	}
 	if result.ExitCode != 0 {
 		t.Fatalf("Build target 'main' exit code %d, stderr:\n%s", result.ExitCode, result.Stderr)
+	}
+}
+
+// newLoadPresetsServer creates an mcpServer with an empty registry for testing
+// the load_presets handler. The registry starts with no instances, so the first
+// call to handleLoadPresets will populate it from disk.
+func newLoadPresetsServer() *mcpServer {
+	registry := newConfigRegistry("_empty")
+	return &mcpServer{registry: registry}
+}
+
+// callLoadPresets calls handleLoadPresets and parses the JSON response.
+func callLoadPresets(t *testing.T, srv *mcpServer) loadPresetsResponse {
+	t.Helper()
+	req := mcp.CallToolRequest{}
+	result, err := srv.handleLoadPresets(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleLoadPresets returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("handleLoadPresets returned tool error: %s", extractText(t, result))
+	}
+	text := extractText(t, result)
+	var resp loadPresetsResponse
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal loadPresetsResponse: %v\nraw: %s", err, text)
+	}
+	return resp
+}
+
+// TestIntegrationLoadPresetsDiscovery verifies that load_presets discovers
+// configure presets from a CMakePresets.json file on disk and returns them
+// as named configurations.
+func TestIntegrationLoadPresetsDiscovery(t *testing.T) {
+	requireCMake(t)
+
+	srcDir := copyFixture(t, "cmake-presets")
+	t.Chdir(srcDir)
+
+	srv := newLoadPresetsServer()
+	resp := callLoadPresets(t, srv)
+
+	// The cmake-presets fixture has one preset named "integration-test".
+	if len(resp.Configs) == 0 {
+		t.Fatal("expected at least one config, got none")
+	}
+
+	var found bool
+	for _, cs := range resp.Configs {
+		if cs.Name == "integration-test" {
+			found = true
+			// Verify build_dir was expanded from ${sourceDir}/build/integration-test.
+			if !strings.HasSuffix(cs.BuildDir, filepath.Join("build", "integration-test")) {
+				t.Errorf("expected build_dir ending in build/integration-test, got %q", cs.BuildDir)
+			}
+			if cs.Status == "" {
+				t.Error("expected non-empty status")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected config named 'integration-test', got configs: %+v", resp.Configs)
+	}
+
+	// On first call with an empty registry, all configs should be "added".
+	if len(resp.Added) == 0 {
+		t.Error("expected at least one config in 'added' on first load")
+	}
+	foundAdded := false
+	for _, name := range resp.Added {
+		if name == "integration-test" {
+			foundAdded = true
+			break
+		}
+	}
+	if !foundAdded {
+		t.Errorf("expected 'integration-test' in added list, got: %v", resp.Added)
+	}
+
+	// No configs should be removed or changed on first load.
+	if len(resp.Removed) != 0 {
+		t.Errorf("expected empty removed list on first load, got: %v", resp.Removed)
+	}
+	if len(resp.Changed) != 0 {
+		t.Errorf("expected empty changed list on first load, got: %v", resp.Changed)
+	}
+}
+
+// TestIntegrationLoadPresetsReloadAddPreset verifies that adding a new preset
+// to CMakePresets.json and calling load_presets again correctly detects the
+// new preset in the "added" list while keeping the original in "unchanged".
+func TestIntegrationLoadPresetsReloadAddPreset(t *testing.T) {
+	requireCMake(t)
+
+	srcDir := copyFixture(t, "cmake-presets")
+	t.Chdir(srcDir)
+
+	srv := newLoadPresetsServer()
+
+	// First call: establish baseline with the original preset.
+	baseline := callLoadPresets(t, srv)
+	if len(baseline.Configs) == 0 {
+		t.Fatal("baseline load returned no configs")
+	}
+
+	// Modify CMakePresets.json to add a second preset.
+	newPresets := `{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "integration-test",
+      "binaryDir": "${sourceDir}/build/integration-test",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "release-test",
+      "binaryDir": "${sourceDir}/build/release-test",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ]
+}`
+	presetsPath := filepath.Join(srcDir, "CMakePresets.json")
+	if err := os.WriteFile(presetsPath, []byte(newPresets), 0o644); err != nil {
+		t.Fatalf("failed to write updated CMakePresets.json: %v", err)
+	}
+
+	// Second call: should detect the added preset.
+	reload := callLoadPresets(t, srv)
+
+	// Verify we now have two configs.
+	if len(reload.Configs) != 2 {
+		t.Fatalf("expected 2 configs after adding preset, got %d: %+v", len(reload.Configs), reload.Configs)
+	}
+
+	// Verify "release-test" is in the added list.
+	foundAdded := false
+	for _, name := range reload.Added {
+		if name == "release-test" {
+			foundAdded = true
+			break
+		}
+	}
+	if !foundAdded {
+		t.Errorf("expected 'release-test' in added list, got: %v", reload.Added)
+	}
+
+	// Verify "integration-test" is in the unchanged list (its config did not change).
+	foundUnchanged := false
+	for _, name := range reload.Unchanged {
+		if name == "integration-test" {
+			foundUnchanged = true
+			break
+		}
+	}
+	if !foundUnchanged {
+		t.Errorf("expected 'integration-test' in unchanged list, got: %v", reload.Unchanged)
+	}
+
+	// Verify nothing was removed.
+	if len(reload.Removed) != 0 {
+		t.Errorf("expected empty removed list, got: %v", reload.Removed)
+	}
+}
+
+// TestIntegrationLoadPresetsReloadRemovePreset verifies that removing a preset
+// from CMakePresets.json and calling load_presets again correctly detects the
+// removed preset in the "removed" list.
+func TestIntegrationLoadPresetsReloadRemovePreset(t *testing.T) {
+	requireCMake(t)
+
+	srcDir := copyFixture(t, "cmake-presets")
+	t.Chdir(srcDir)
+
+	// Start with two presets so we can remove one.
+	twoPresets := `{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "debug-test",
+      "binaryDir": "${sourceDir}/build/debug-test",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "release-test",
+      "binaryDir": "${sourceDir}/build/release-test",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ]
+}`
+	presetsPath := filepath.Join(srcDir, "CMakePresets.json")
+	if err := os.WriteFile(presetsPath, []byte(twoPresets), 0o644); err != nil {
+		t.Fatalf("failed to write initial CMakePresets.json: %v", err)
+	}
+
+	srv := newLoadPresetsServer()
+
+	// First call: establish baseline with two presets.
+	baseline := callLoadPresets(t, srv)
+	if len(baseline.Configs) != 2 {
+		t.Fatalf("baseline should have 2 configs, got %d: %+v", len(baseline.Configs), baseline.Configs)
+	}
+
+	// Remove "release-test" preset, keeping only "debug-test".
+	onePreset := `{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "debug-test",
+      "binaryDir": "${sourceDir}/build/debug-test",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    }
+  ]
+}`
+	if err := os.WriteFile(presetsPath, []byte(onePreset), 0o644); err != nil {
+		t.Fatalf("failed to write updated CMakePresets.json: %v", err)
+	}
+
+	// Second call: should detect the removed preset.
+	reload := callLoadPresets(t, srv)
+
+	// Verify we now have one config.
+	if len(reload.Configs) != 1 {
+		t.Fatalf("expected 1 config after removing preset, got %d: %+v", len(reload.Configs), reload.Configs)
+	}
+	if reload.Configs[0].Name != "debug-test" {
+		t.Errorf("expected remaining config to be 'debug-test', got %q", reload.Configs[0].Name)
+	}
+
+	// Verify "release-test" is in the removed list.
+	foundRemoved := false
+	for _, name := range reload.Removed {
+		if name == "release-test" {
+			foundRemoved = true
+			break
+		}
+	}
+	if !foundRemoved {
+		t.Errorf("expected 'release-test' in removed list, got: %v", reload.Removed)
+	}
+
+	// Verify "debug-test" is in the unchanged list.
+	foundUnchanged := false
+	for _, name := range reload.Unchanged {
+		if name == "debug-test" {
+			foundUnchanged = true
+			break
+		}
+	}
+	if !foundUnchanged {
+		t.Errorf("expected 'debug-test' in unchanged list, got: %v", reload.Unchanged)
+	}
+
+	// Verify nothing was added.
+	if len(reload.Added) != 0 {
+		t.Errorf("expected empty added list, got: %v", reload.Added)
 	}
 }
 
