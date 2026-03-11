@@ -154,6 +154,13 @@ func main() {
 	)
 
 	s.AddTool(
+		mcp.NewTool("load_presets",
+			mcp.WithDescription("Reload build configurations and CMake presets from disk. Re-reads .cpp-build-mcp.json and CMakePresets.json, updating the available configurations. Unchanged configurations preserve their build state."),
+		),
+		srv.handleLoadPresets,
+	)
+
+	s.AddTool(
 		mcp.NewTool("list_targets",
 			mcp.WithDescription("List available build targets for the project."),
 			mcp.WithString("config", mcp.Description("Configuration name (omit for default)")),
@@ -172,6 +179,15 @@ func main() {
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+// loadPresetsResponse is the JSON structure returned by the load_presets tool.
+type loadPresetsResponse struct {
+	Configs   []ConfigSummary `json:"configs"`
+	Added     []string        `json:"added"`
+	Removed   []string        `json:"removed"`
+	Changed   []string        `json:"changed"`
+	Unchanged []string        `json:"unchanged"`
 }
 
 // listConfigsResponse is the JSON structure returned by the list_configs tool.
@@ -295,6 +311,49 @@ func (srv *mcpServer) handleListConfigs(_ context.Context, _ mcp.CallToolRequest
 	data, err := json.Marshal(resp)
 	if err != nil {
 		return mcp.NewToolResultError("failed to marshal response: " + err.Error()), nil
+	}
+
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+func (srv *mcpServer) handleLoadPresets(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	configs, defaultName, err := config.LoadMulti(".")
+	if err != nil {
+		return mcp.NewToolResultError("failed to reload config: " + err.Error()), nil
+	}
+
+	result, err := srv.registry.reload(configs, defaultName, builder.NewBuilder, func(inst *configInstance) {
+		resolveToolchain(inst)
+	})
+	if err != nil {
+		return mcp.NewToolResultError("failed to reload registry: " + err.Error()), nil
+	}
+
+	resp := loadPresetsResponse{
+		Configs:   srv.registry.list(),
+		Added:     result.Added,
+		Removed:   result.Removed,
+		Changed:   result.Changed,
+		Unchanged: result.Unchanged,
+	}
+
+	// Ensure nil slices serialize as empty arrays.
+	if resp.Added == nil {
+		resp.Added = []string{}
+	}
+	if resp.Removed == nil {
+		resp.Removed = []string{}
+	}
+	if resp.Changed == nil {
+		resp.Changed = []string{}
+	}
+	if resp.Unchanged == nil {
+		resp.Unchanged = []string{}
+	}
+
+	data, marshalErr := json.Marshal(resp)
+	if marshalErr != nil {
+		return mcp.NewToolResultError("failed to marshal response: " + marshalErr.Error()), nil
 	}
 
 	return mcp.NewToolResultText(string(data)), nil
