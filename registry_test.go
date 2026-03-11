@@ -11,11 +11,13 @@ import (
 )
 
 func makeTestInstance(name, buildDir string) *configInstance {
+	cfg := &config.Config{BuildDir: buildDir}
 	return &configInstance{
-		name:    name,
-		cfg:     &config.Config{BuildDir: buildDir},
-		builder: &fakeBuilder{},
-		store:   state.NewStore(),
+		name:        name,
+		cfg:         cfg,
+		originalCfg: *cfg,
+		builder:     &fakeBuilder{},
+		store:       state.NewStore(),
 	}
 }
 

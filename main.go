@@ -289,7 +289,7 @@ func resolveToolchain(inst *configInstance) string {
 func (srv *mcpServer) handleListConfigs(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	resp := listConfigsResponse{
 		Configs:       srv.registry.list(),
-		DefaultConfig: srv.registry.dflt,
+		DefaultConfig: srv.registry.getDefault(),
 	}
 
 	data, err := json.Marshal(resp)

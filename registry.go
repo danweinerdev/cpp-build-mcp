@@ -80,6 +80,13 @@ func (r *configRegistry) defaultInstance() *configInstance {
 	return inst
 }
 
+// getDefault returns the name of the default configuration.
+func (r *configRegistry) getDefault() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.dflt
+}
+
 // list returns summaries of all configurations sorted by name.
 func (r *configRegistry) list() []ConfigSummary {
 	r.mu.RLock()
@@ -151,6 +158,7 @@ func (r *configRegistry) reload(
 	configs map[string]*config.Config,
 	defaultName string,
 	builderFactory func(*config.Config) (builder.Builder, error),
+	toolchainResolver func(*configInstance),
 ) (reloadResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -190,13 +198,15 @@ func (r *configRegistry) reload(
 		if err != nil {
 			return reloadResult{}, fmt.Errorf("creating builder for config %q: %w", name, err)
 		}
-		newInstances[name] = &configInstance{
+		inst := &configInstance{
 			name:        name,
 			cfg:         cfg,
 			originalCfg: *cfg,
 			builder:     b,
 			store:       state.NewStore(),
 		}
+		toolchainResolver(inst)
+		newInstances[name] = inst
 	}
 
 	// Detect removed configs (in old but not in new).
