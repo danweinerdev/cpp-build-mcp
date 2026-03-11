@@ -68,6 +68,7 @@ func startE2E(t *testing.T, fb *fakeBuilder) *e2eEnv {
 	registry.add(&configInstance{
 		name:    "default",
 		cfg:     cfg,
+		originalCfg: *cfg,
 		builder: fb,
 		store:   store,
 	})
@@ -85,6 +86,7 @@ func startE2E(t *testing.T, fb *fakeBuilder) *e2eEnv {
 			mcp.WithDescription("Build the C/C++ project."),
 			mcp.WithArray("targets", mcp.WithStringItems()),
 			mcp.WithNumber("jobs"),
+			mcp.WithBoolean("reconfigure", mcp.Description("Re-run CMake configure before building.")),
 		),
 		srv.handleBuild,
 	)
@@ -147,6 +149,13 @@ func startE2E(t *testing.T, fb *fakeBuilder) *e2eEnv {
 			mcp.WithDescription("List all available build configurations."),
 		),
 		srv.handleListConfigs,
+	)
+
+	s.AddTool(
+		mcp.NewTool("load_presets",
+			mcp.WithDescription("Reload build configurations and CMake presets from disk."),
+		),
+		srv.handleLoadPresets,
 	)
 
 	s.AddResource(
@@ -500,6 +509,7 @@ func TestE2EBuildInProgressGuard(t *testing.T) {
 	registry.add(&configInstance{
 		name:    "default",
 		cfg:     cfg,
+		originalCfg: *cfg,
 		builder: blockingBuilder,
 		store:   store,
 	})
@@ -732,12 +742,14 @@ func startMultiE2E(t *testing.T, debugFB, releaseFB *fakeBuilder) *multiE2EEnv {
 	registry.add(&configInstance{
 		name:    "debug",
 		cfg:     debugCfg,
+		originalCfg: *debugCfg,
 		builder: debugFB,
 		store:   debugStore,
 	})
 	registry.add(&configInstance{
 		name:    "release",
 		cfg:     releaseCfg,
+		originalCfg: *releaseCfg,
 		builder: releaseFB,
 		store:   releaseStore,
 	})
@@ -1471,6 +1483,7 @@ func TestE2EBuildProgressNotifications(t *testing.T) {
 	registry.add(&configInstance{
 		name:    "default",
 		cfg:     cfg,
+		originalCfg: *cfg,
 		builder: fb,
 		store:   store,
 	})
@@ -1597,6 +1610,7 @@ func TestE2EBuildNoProgressWithoutToken(t *testing.T) {
 	registry.add(&configInstance{
 		name:    "default",
 		cfg:     cfg,
+		originalCfg: *cfg,
 		builder: fb,
 		store:   store,
 	})
@@ -1689,12 +1703,14 @@ func TestE2EMultiConfigProgressPrefix(t *testing.T) {
 	registry.add(&configInstance{
 		name:    "debug",
 		cfg:     debugCfg,
+		originalCfg: *debugCfg,
 		builder: debugFB,
 		store:   debugStore,
 	})
 	registry.add(&configInstance{
 		name:    "release",
 		cfg:     releaseCfg,
+		originalCfg: *releaseCfg,
 		builder: releaseFB,
 		store:   releaseStore,
 	})
@@ -1769,5 +1785,77 @@ func TestE2EMultiConfigProgressPrefix(t *testing.T) {
 
 	if !strings.HasPrefix(params.Message, "[debug] ") {
 		t.Errorf("expected message to start with [debug] prefix, got %q", params.Message)
+	}
+}
+
+func TestE2ELoadPresets(t *testing.T) {
+	fb := &fakeBuilder{}
+	env := startE2E(t, fb)
+	defer env.cancel()
+
+	resp := env.callTool(t, "load_presets", nil)
+	if resp.Error != nil {
+		t.Fatalf("JSON-RPC error: %s", resp.Error.Message)
+	}
+
+	text, isError := toolResultText(t, resp)
+	if isError {
+		t.Fatalf("unexpected tool error: %s", text)
+	}
+
+	var lr loadPresetsResponse
+	if err := json.Unmarshal([]byte(text), &lr); err != nil {
+		t.Fatalf("unmarshal load_presets response: %v", err)
+	}
+	if lr.Configs == nil {
+		t.Fatal("expected non-nil configs array")
+	}
+	if lr.Added == nil {
+		t.Fatal("expected non-nil added array")
+	}
+	if lr.Removed == nil {
+		t.Fatal("expected non-nil removed array")
+	}
+}
+
+func TestE2EBuildReconfigure(t *testing.T) {
+	fb := &fakeBuilder{
+		configureResult: &builder.BuildResult{
+			ExitCode: 0,
+			Stdout:   "-- Configuring done\n-- Generating done\n",
+			Duration: time.Millisecond,
+		},
+		buildResult: &builder.BuildResult{
+			ExitCode: 0,
+			Stdout:   "[1/1] Building CXX object main.cpp.o\n",
+			Duration: time.Second,
+		},
+	}
+	env := startE2E(t, fb)
+	defer env.cancel()
+
+	// Call build with reconfigure=true — should auto-configure then build.
+	resp := env.callTool(t, "build", map[string]any{"reconfigure": true})
+	if resp.Error != nil {
+		t.Fatalf("JSON-RPC error: %s", resp.Error.Message)
+	}
+
+	text, isError := toolResultText(t, resp)
+	if isError {
+		t.Fatalf("unexpected tool error: %s", text)
+	}
+
+	var br buildResponse
+	if err := json.Unmarshal([]byte(text), &br); err != nil {
+		t.Fatalf("unmarshal build response: %v", err)
+	}
+	if br.ExitCode != 0 {
+		t.Fatalf("expected exit_code 0, got %d", br.ExitCode)
+	}
+	if !fb.configureCalled {
+		t.Error("expected Configure to have been called")
+	}
+	if !fb.buildCalled {
+		t.Error("expected Build to have been called")
 	}
 }

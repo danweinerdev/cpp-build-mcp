@@ -1735,3 +1735,195 @@ func TestIntegrationLoadPresetsReloadRemovePreset(t *testing.T) {
 	}
 }
 
+// newIntegrationServer creates an mcpServer with a real CMakeBuilder for
+// integration testing. The returned store is in the unconfigured state.
+func newIntegrationServer(t *testing.T, cfg *config.Config) (*mcpServer, *state.Store) {
+	t.Helper()
+	b := builder.NewCMakeBuilder(cfg)
+	store := state.NewStore()
+	registry := newConfigRegistry("default")
+	registry.add(&configInstance{
+		name:        "default",
+		cfg:         cfg,
+		originalCfg: *cfg,
+		builder:     b,
+		store:       store,
+	})
+	return &mcpServer{registry: registry}, store
+}
+
+// TestIntegrationBuildReconfigureFresh verifies that calling build with
+// reconfigure=true on a fresh (unconfigured) project automatically runs
+// cmake configure and then builds successfully.
+func TestIntegrationBuildReconfigureFresh(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	tc := detectToolchain(t)
+	srcDir := copyFixture(t, "cmake")
+	buildDir := filepath.Join(srcDir, "build")
+
+	cfg := &config.Config{
+		SourceDir:             srcDir,
+		BuildDir:              buildDir,
+		Toolchain:             tc.toolchain,
+		Generator:             "ninja",
+		InjectDiagnosticFlags: false,
+		BuildTimeout:          2 * time.Minute,
+	}
+	srv, _ := newIntegrationServer(t, cfg)
+	ctx := context.Background()
+
+	// Call build with reconfigure=true on a fresh project (no prior configure).
+	req := makeCallToolRequest(map[string]interface{}{
+		"reconfigure": true,
+	})
+	result, err := srv.handleBuild(ctx, req)
+	if err != nil {
+		t.Fatalf("handleBuild returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	// Parse the response as a buildResponse.
+	text := extractText(t, result)
+	var resp buildResponse
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal buildResponse: %v\ntext: %s", err, text)
+	}
+
+	if resp.ExitCode != 0 {
+		t.Fatalf("expected exit_code 0, got %d", resp.ExitCode)
+	}
+	if resp.ErrorCount != 0 {
+		t.Errorf("expected error_count 0, got %d", resp.ErrorCount)
+	}
+
+	// Verify the build directory was created (configure ran).
+	if _, err := os.Stat(buildDir); os.IsNotExist(err) {
+		t.Errorf("build directory was not created — configure did not run")
+	}
+}
+
+// TestIntegrationBuildReconfigureAfterChange verifies that calling build with
+// reconfigure=true on an already-configured-and-built project re-runs cmake
+// configure and then builds successfully.
+func TestIntegrationBuildReconfigureAfterChange(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	tc := detectToolchain(t)
+	srcDir := copyFixture(t, "cmake")
+	buildDir := filepath.Join(srcDir, "build")
+
+	cfg := &config.Config{
+		SourceDir:             srcDir,
+		BuildDir:              buildDir,
+		Toolchain:             tc.toolchain,
+		Generator:             "ninja",
+		InjectDiagnosticFlags: false,
+		BuildTimeout:          2 * time.Minute,
+	}
+	srv, _ := newIntegrationServer(t, cfg)
+	ctx := context.Background()
+
+	// Step 1: Configure and build the project normally first.
+	configReq := makeCallToolRequest(nil)
+	configResult, err := srv.handleConfigure(ctx, configReq)
+	if err != nil {
+		t.Fatalf("handleConfigure returned error: %v", err)
+	}
+	if configResult.IsError {
+		t.Fatalf("configure failed: %s", extractText(t, configResult))
+	}
+
+	buildReq := makeCallToolRequest(nil)
+	buildResult, err := srv.handleBuild(ctx, buildReq)
+	if err != nil {
+		t.Fatalf("handleBuild returned error: %v", err)
+	}
+	if buildResult.IsError {
+		t.Fatalf("initial build failed: %s", extractText(t, buildResult))
+	}
+
+	// Step 2: Call build with reconfigure=true.
+	reconfigReq := makeCallToolRequest(map[string]interface{}{
+		"reconfigure": true,
+	})
+	result, err := srv.handleBuild(ctx, reconfigReq)
+	if err != nil {
+		t.Fatalf("handleBuild with reconfigure returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	text := extractText(t, result)
+	var resp buildResponse
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal buildResponse: %v\ntext: %s", err, text)
+	}
+
+	if resp.ExitCode != 0 {
+		t.Fatalf("expected exit_code 0, got %d", resp.ExitCode)
+	}
+}
+
+// TestIntegrationBuildReconfigureWithCMakeError verifies that calling build with
+// reconfigure=true when CMakeLists.txt has an error returns a configureResponse
+// with success=false and structured error diagnostics.
+func TestIntegrationBuildReconfigureWithCMakeError(t *testing.T) {
+	requireCMake(t)
+	requireNinja(t)
+
+	srcDir := copyFixture(t, "cmake-configure-error")
+	buildDir := filepath.Join(srcDir, "build")
+
+	cfg := &config.Config{
+		SourceDir:             srcDir,
+		BuildDir:              buildDir,
+		Toolchain:             "auto",
+		Generator:             "ninja",
+		InjectDiagnosticFlags: false,
+		BuildTimeout:          2 * time.Minute,
+	}
+	srv, _ := newIntegrationServer(t, cfg)
+	ctx := context.Background()
+
+	req := makeCallToolRequest(map[string]interface{}{
+		"reconfigure": true,
+	})
+	result, err := srv.handleBuild(ctx, req)
+	if err != nil {
+		t.Fatalf("handleBuild returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected structured configureResponse, got tool error: %s", extractText(t, result))
+	}
+
+	text := extractText(t, result)
+	var resp configureResponse
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal configureResponse: %v\ntext: %s", err, text)
+	}
+
+	if resp.Success {
+		t.Fatal("expected success=false in configureResponse for CMake error")
+	}
+	if resp.ErrorCount == 0 {
+		t.Fatal("expected error_count > 0 for CMake configure failure")
+	}
+
+	found := false
+	for _, msg := range resp.Messages {
+		if strings.Contains(msg, "intentional configure failure") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a message containing 'intentional configure failure', got: %v", resp.Messages)
+	}
+}
+
