@@ -3029,6 +3029,61 @@ func TestListTargetsNotSupported(t *testing.T) {
 	}
 }
 
+func TestHandleLoadPresetsResponseStructure(t *testing.T) {
+	fb := &fakeBuilder{}
+	srv, _ := newTestServer(fb)
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleLoadPresets(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	text := extractText(t, result)
+	var resp loadPresetsResponse
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v\nraw: %s", err, text)
+	}
+
+	// Verify all expected fields are present (non-nil arrays, even if empty).
+	if resp.Configs == nil {
+		t.Fatal("expected configs to be non-nil")
+	}
+	if resp.Added == nil {
+		t.Fatal("expected added to be non-nil array")
+	}
+	if resp.Removed == nil {
+		t.Fatal("expected removed to be non-nil array")
+	}
+	if resp.Changed == nil {
+		t.Fatal("expected changed to be non-nil array")
+	}
+	if resp.Unchanged == nil {
+		t.Fatal("expected unchanged to be non-nil array")
+	}
+
+	// Verify configs contains at least one entry (the default config from LoadMulti).
+	if len(resp.Configs) == 0 {
+		t.Fatal("expected at least one config entry")
+	}
+
+	// Verify each config summary has the expected fields populated.
+	for i, cs := range resp.Configs {
+		if cs.Name == "" {
+			t.Fatalf("config[%d] has empty name", i)
+		}
+		if cs.BuildDir == "" {
+			t.Fatalf("config[%d] (%s) has empty build_dir", i, cs.Name)
+		}
+		if cs.Status == "" {
+			t.Fatalf("config[%d] (%s) has empty status", i, cs.Name)
+		}
+	}
+}
+
 func extractText(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()
 	if len(result.Content) == 0 {

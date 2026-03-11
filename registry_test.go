@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danweinerdev/cpp-build-mcp/builder"
 	"github.com/danweinerdev/cpp-build-mcp/config"
 	"github.com/danweinerdev/cpp-build-mcp/diagnostics"
 	"github.com/danweinerdev/cpp-build-mcp/state"
@@ -295,5 +296,170 @@ func TestRegistryAll(t *testing.T) {
 	}
 	if all[2].name != "release" {
 		t.Fatalf("expected third instance 'release', got %q", all[2].name)
+	}
+}
+
+// --- reload tests ---
+
+// fakeBuilderFactory returns a builderFactory that creates fakeBuilder instances.
+func fakeBuilderFactory(cfg *config.Config) (builder.Builder, error) {
+	return &fakeBuilder{}, nil
+}
+
+// noopToolchainResolver is a no-op toolchainResolver for reload tests.
+func noopToolchainResolver(_ *configInstance) {}
+
+func TestReloadAddsNewConfig(t *testing.T) {
+	reg := newConfigRegistry("a")
+	reg.add(makeTestInstance("a", "build-a"))
+
+	configs := map[string]*config.Config{
+		"a": {BuildDir: "build-a"},
+		"b": {BuildDir: "build-b"},
+	}
+
+	result, err := reg.reload(configs, "a", fakeBuilderFactory, noopToolchainResolver)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// "b" should be in Added.
+	if len(result.Added) != 1 || result.Added[0] != "b" {
+		t.Fatalf("expected Added=[b], got %v", result.Added)
+	}
+
+	// "a" should be in Unchanged.
+	if len(result.Unchanged) != 1 || result.Unchanged[0] != "a" {
+		t.Fatalf("expected Unchanged=[a], got %v", result.Unchanged)
+	}
+
+	// Registry should now contain both.
+	if reg.len() != 2 {
+		t.Fatalf("expected 2 instances, got %d", reg.len())
+	}
+
+	if _, err := reg.get("b"); err != nil {
+		t.Fatalf("expected to find config 'b': %v", err)
+	}
+}
+
+func TestReloadRemovesStaleConfig(t *testing.T) {
+	reg := newConfigRegistry("a")
+	reg.add(makeTestInstance("a", "build-a"))
+	reg.add(makeTestInstance("b", "build-b"))
+
+	configs := map[string]*config.Config{
+		"a": {BuildDir: "build-a"},
+	}
+
+	result, err := reg.reload(configs, "a", fakeBuilderFactory, noopToolchainResolver)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// "b" should be in Removed.
+	if len(result.Removed) != 1 || result.Removed[0] != "b" {
+		t.Fatalf("expected Removed=[b], got %v", result.Removed)
+	}
+
+	// Registry should now contain only "a".
+	if reg.len() != 1 {
+		t.Fatalf("expected 1 instance, got %d", reg.len())
+	}
+
+	if _, err := reg.get("b"); err == nil {
+		t.Fatal("expected error for removed config 'b'")
+	}
+}
+
+func TestReloadPreservesStateForUnchangedConfig(t *testing.T) {
+	reg := newConfigRegistry("x")
+	inst := makeTestInstance("x", "build-x")
+	// Advance the store to PhaseConfigured.
+	inst.store.SetConfigured()
+	reg.add(inst)
+
+	// Reload with an identical config.
+	configs := map[string]*config.Config{
+		"x": {BuildDir: "build-x"},
+	}
+
+	result, err := reg.reload(configs, "x", fakeBuilderFactory, noopToolchainResolver)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.Unchanged) != 1 || result.Unchanged[0] != "x" {
+		t.Fatalf("expected Unchanged=[x], got %v", result.Unchanged)
+	}
+
+	// The store should still be at PhaseConfigured (state preserved).
+	got, err := reg.get("x")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.store.GetPhase() != state.PhaseConfigured {
+		t.Fatalf("expected PhaseConfigured, got %d", got.store.GetPhase())
+	}
+}
+
+func TestReloadResetsStateForChangedConfig(t *testing.T) {
+	reg := newConfigRegistry("x")
+	inst := makeTestInstance("x", "build-x")
+	// Advance the store to PhaseBuilt.
+	inst.store.SetConfigured()
+	if err := inst.store.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	inst.store.FinishBuild(0, time.Second, nil, nil)
+	reg.add(inst)
+
+	// Reload with a changed config (different BuildDir).
+	configs := map[string]*config.Config{
+		"x": {BuildDir: "build-x-changed"},
+	}
+
+	result, err := reg.reload(configs, "x", fakeBuilderFactory, noopToolchainResolver)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.Changed) != 1 || result.Changed[0] != "x" {
+		t.Fatalf("expected Changed=[x], got %v", result.Changed)
+	}
+
+	// The store should be reset to PhaseUnconfigured (fresh store).
+	got, err := reg.get("x")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.store.GetPhase() != state.PhaseUnconfigured {
+		t.Fatalf("expected PhaseUnconfigured, got %d", got.store.GetPhase())
+	}
+}
+
+func TestReloadUpdatesDefaultWhenOldDefaultRemoved(t *testing.T) {
+	reg := newConfigRegistry("a")
+	reg.add(makeTestInstance("a", "build-a"))
+	reg.add(makeTestInstance("b", "build-b"))
+
+	// Reload with only "b", specifying "b" as the new default.
+	configs := map[string]*config.Config{
+		"b": {BuildDir: "build-b"},
+	}
+
+	_, err := reg.reload(configs, "b", fakeBuilderFactory, noopToolchainResolver)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if reg.getDefault() != "b" {
+		t.Fatalf("expected default 'b', got %q", reg.getDefault())
+	}
+
+	// Verify the default instance is accessible.
+	inst := reg.defaultInstance()
+	if inst.name != "b" {
+		t.Fatalf("expected defaultInstance name 'b', got %q", inst.name)
 	}
 }
