@@ -42,6 +42,9 @@ type fakeBuilder struct {
 	// Captured dirty flag from the last SetDirty call.
 	lastDirtySet bool
 
+	// Set to true when Build is called.
+	buildCalled bool
+
 	// Set to true when Configure is called.
 	configureCalled bool
 
@@ -63,6 +66,7 @@ func (f *fakeBuilder) Configure(_ context.Context, args []string) (*builder.Buil
 }
 
 func (f *fakeBuilder) Build(_ context.Context, targets []string, jobs int) (*builder.BuildResult, error) {
+	f.buildCalled = true
 	f.lastTargets = targets
 	f.lastJobs = jobs
 	if f.buildErr != nil {
@@ -3081,6 +3085,143 @@ func TestHandleLoadPresetsResponseStructure(t *testing.T) {
 		if cs.Status == "" {
 			t.Fatalf("config[%d] (%s) has empty status", i, cs.Name)
 		}
+	}
+}
+
+func TestBuildReconfigureThenBuild(t *testing.T) {
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	req := makeCallToolRequest(map[string]interface{}{
+		"reconfigure": true,
+	})
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+	if !fb.configureCalled {
+		t.Fatal("expected Configure to be called when reconfigure=true")
+	}
+	if !fb.buildCalled {
+		t.Fatal("expected Build to be called after reconfigure")
+	}
+}
+
+func TestBuildWithoutReconfigureSkipsConfigure(t *testing.T) {
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	req := makeCallToolRequest(nil)
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+	if fb.configureCalled {
+		t.Fatal("expected Configure NOT to be called when reconfigure is omitted")
+	}
+	if !fb.buildCalled {
+		t.Fatal("expected Build to be called")
+	}
+}
+
+func TestBuildReconfigureOnUnconfiguredProject(t *testing.T) {
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},
+	}
+	srv, _ := newTestServer(fb)
+	// Do NOT call store.SetConfigured() — project starts unconfigured.
+
+	req := makeCallToolRequest(map[string]interface{}{
+		"reconfigure": true,
+	})
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+	if !fb.configureCalled {
+		t.Fatal("expected Configure to be called on unconfigured project with reconfigure=true")
+	}
+	if !fb.buildCalled {
+		t.Fatal("expected Build to be called after reconfigure on unconfigured project")
+	}
+}
+
+func TestBuildReconfigureConfigureFailure(t *testing.T) {
+	fb := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 1, Duration: time.Second},
+		buildResult:     &builder.BuildResult{ExitCode: 0, Duration: time.Second},
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	req := makeCallToolRequest(map[string]interface{}{
+		"reconfigure": true,
+	})
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	// Build should NOT have been called because configure failed.
+	if fb.buildCalled {
+		t.Fatal("expected Build NOT to be called when configure fails")
+	}
+
+	// Response should be a configureResponse with success=false.
+	var resp configureResponse
+	text := extractText(t, result)
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("expected success=false in configureResponse when configure fails")
+	}
+}
+
+func TestBuildReconfigurePassesCMakeArgs(t *testing.T) {
+	fb := &fakeBuilder{
+		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},
+	}
+	srv, store := newTestServer(fb)
+	store.SetConfigured()
+
+	// Set CMakeArgs on the config instance.
+	inst := srv.registry.defaultInstance()
+	inst.cfg.CMakeArgs = []string{"-DFOO=1"}
+
+	req := makeCallToolRequest(map[string]interface{}{
+		"reconfigure": true,
+	})
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+	if !fb.configureCalled {
+		t.Fatal("expected Configure to be called")
+	}
+	if len(fb.lastConfigureArgs) != 1 || fb.lastConfigureArgs[0] != "-DFOO=1" {
+		t.Fatalf("expected lastConfigureArgs=[-DFOO=1], got %v", fb.lastConfigureArgs)
 	}
 }
 
