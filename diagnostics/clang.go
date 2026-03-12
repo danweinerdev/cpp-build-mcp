@@ -28,6 +28,17 @@ var ninjaSummaryRe = regexp.MustCompile(`(?m)^ninja:.*$`)
 // "2 warnings generated." that Clang appends after its diagnostic output.
 var compilerCountRe = regexp.MustCompile(`(?m)^\d+ (?:error|warning)s? generated\.$`)
 
+// makeProgressRe matches CMake Make-generator progress lines like
+// "[ 50%] Building CXX object ..." or "[100%] Linking CXX executable main".
+// These appear in stdout when Unix Makefiles is the generator and contain '['
+// characters that confuse JSON format detection.
+var makeProgressRe = regexp.MustCompile(`(?m)^\[\s*\d+%\].*$`)
+
+// makeErrorRe matches GNU Make error lines like "make[2]: *** [target] Error 1"
+// that appear after build failures. These contain '[' characters that can
+// confuse JSON format detection.
+var makeErrorRe = regexp.MustCompile(`(?m)^make\[?\d*\]?:.*$`)
+
 // cmakeStatusRe matches CMake status lines like "-- The CXX compiler
 // identification is Clang 19.0.0". These appear on stderr when a build
 // triggers an automatic CMake reconfigure (because CMakeLists.txt changed)
@@ -44,6 +55,8 @@ func stripNinjaNoise(s string) string {
 	s = ninjaProgressRe.ReplaceAllString(s, "")
 	s = ninjaFailedRe.ReplaceAllString(s, "")
 	s = ninjaSummaryRe.ReplaceAllString(s, "")
+	s = makeProgressRe.ReplaceAllString(s, "")
+	s = makeErrorRe.ReplaceAllString(s, "")
 	s = compilerCountRe.ReplaceAllString(s, "")
 	s = cmakeStatusRe.ReplaceAllString(s, "")
 	return s

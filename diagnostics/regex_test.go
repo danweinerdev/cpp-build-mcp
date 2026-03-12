@@ -187,6 +187,24 @@ func TestRegexParser_Parse(t *testing.T) {
 		}
 	})
 
+	t.Run("make noise lines ignored in stderr", func(t *testing.T) {
+		stderr := "[ 50%] Building CXX object CMakeFiles/main.dir/main.cpp.o\n" +
+			"main.cpp:10:5: error: use of undeclared identifier 'x'\n" +
+			"make[2]: *** [CMakeFiles/main.dir/main.cpp.o] Error 1\n" +
+			"make: *** [all] Error 2"
+		diags, err := parser.Parse("", stderr)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic (make noise ignored), got %d", len(diags))
+		}
+		assertDiagField(t, "File", diags[0].File, "main.cpp")
+		assertDiagInt(t, "Line", diags[0].Line, 10)
+		assertDiagSeverity(t, diags[0].Severity, SeverityError)
+		assertDiagField(t, "Message", diags[0].Message, "use of undeclared identifier 'x'")
+	})
+
 	t.Run("MSVC fatal error", func(t *testing.T) {
 		stderr := "main.cpp(1,10): fatal error C1083: Cannot open include file"
 		diags, err := parser.Parse("", stderr)

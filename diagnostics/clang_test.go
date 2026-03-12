@@ -479,6 +479,53 @@ func TestClangParser_Parse(t *testing.T) {
 		assertDiagField(t, "Message", diags[0].Message, "w1")
 	})
 
+	t.Run("make progress stripped from stderr before SARIF", func(t *testing.T) {
+		sarif := `{"runs":[{"results":[{
+			"level":"warning",
+			"message":{"text":"w1"},
+			"ruleId":"",
+			"locations":[]
+		}]}]}`
+		stderr := "[ 50%] Building CXX object a.cpp.o\n" + sarif
+
+		diags, err := parser.Parse("", stderr)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "w1")
+	})
+
+	t.Run("make error lines stripped from stdout before JSON", func(t *testing.T) {
+		stdout := "[ 50%] Building CXX object CMakeFiles/main.dir/a.cpp.o\n" +
+			`[
+			{
+				"file": "a.cpp",
+				"line": 1,
+				"column": 1,
+				"severity": "error",
+				"message": "undeclared identifier",
+				"option": "",
+				"ranges": [],
+				"fixits": []
+			}
+		]` + "\n" +
+			"1 error generated.\n" +
+			"make[2]: *** [CMakeFiles/main.dir/a.cpp.o] Error 1\n" +
+			"make: *** [all] Error 2"
+
+		diags, err := parser.Parse(stdout, "")
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "undeclared identifier")
+	})
+
 	t.Run("neither stream has structured content returns nil", func(t *testing.T) {
 		diags, err := parser.Parse("some text", "error: something")
 		if err != nil {
@@ -593,6 +640,57 @@ func TestStripNinjaNoise(t *testing.T) {
 		}
 		if !strings.Contains(got, `"level":"error"`) {
 			t.Error("SARIF diagnostic content should be preserved")
+		}
+	})
+
+	t.Run("strips make progress lines", func(t *testing.T) {
+		input := "[ 50%] Building CXX object CMakeFiles/main.dir/main.cpp.o\n" +
+			`[{"file":"main.cpp"}]` + "\n" +
+			"[100%] Linking CXX executable main"
+		got := stripNinjaNoise(input)
+		if strings.Contains(got, "[ 50%]") || strings.Contains(got, "[100%]") {
+			t.Errorf("make progress lines not stripped: %q", got)
+		}
+		if !strings.Contains(got, `[{"file":"main.cpp"}]`) {
+			t.Errorf("JSON content should be preserved: %q", got)
+		}
+	})
+
+	t.Run("strips make error lines", func(t *testing.T) {
+		input := `[{"file":"a.cpp"}]` + "\n" +
+			"make[2]: *** [CMakeFiles/main.dir/a.cpp.o] Error 1\n" +
+			"make[1]: *** [CMakeFiles/main.dir/all] Error 2\n" +
+			"make: *** [all] Error 2"
+		got := stripNinjaNoise(input)
+		if strings.Contains(got, "make[2]:") || strings.Contains(got, "make[1]:") || strings.Contains(got, "make:") {
+			t.Errorf("make error lines not stripped: %q", got)
+		}
+		if !strings.Contains(got, `[{"file":"a.cpp"}]`) {
+			t.Errorf("JSON content should be preserved: %q", got)
+		}
+	})
+
+	t.Run("strips all noise types including make", func(t *testing.T) {
+		input := "[ 50%] Building CXX object a.cpp.o\n" +
+			`[{"file":"a.cpp","line":1,"column":1,"severity":"error","message":"err","option":""}]` + "\n" +
+			"1 error generated.\n" +
+			"make[2]: *** [CMakeFiles/main.dir/a.cpp.o] Error 1\n" +
+			"make: *** [all] Error 2"
+		got := stripNinjaNoise(input)
+		if strings.Contains(got, "[ 50%]") {
+			t.Error("make progress line not stripped")
+		}
+		if strings.Contains(got, "make[2]:") {
+			t.Error("make error line not stripped")
+		}
+		if strings.Contains(got, "make:") {
+			t.Error("make summary line not stripped")
+		}
+		if strings.Contains(got, "error generated") {
+			t.Error("compiler count not stripped")
+		}
+		if !strings.Contains(got, `"severity":"error"`) {
+			t.Error("JSON diagnostic content should be preserved")
 		}
 	})
 

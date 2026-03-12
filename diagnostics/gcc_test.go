@@ -513,6 +513,37 @@ func TestGCCParser_NinjaNoiseStripped(t *testing.T) {
 		}
 		assertDiagField(t, "Message", diags[0].Message, "unused")
 	})
+
+	t.Run("make progress and error lines stripped from stdout", func(t *testing.T) {
+		stdout := "[ 50%] Building CXX object CMakeFiles/main.dir/a.cpp.o\n" +
+			`[{"kind":"error","message":"undeclared","option":"","locations":[{"caret":{"file":"a.cpp","line":1,"column":1}}],"children":[]}]` + "\n" +
+			"1 error generated.\n" +
+			"make[2]: *** [CMakeFiles/main.dir/a.cpp.o] Error 1\n" +
+			"make: *** [all] Error 2"
+
+		diags, err := parser.Parse(stdout, "")
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "undeclared")
+	})
+
+	t.Run("make progress lines stripped from stderr", func(t *testing.T) {
+		stderr := "[ 50%] Building CXX object a.cpp.o\n" +
+			`[{"kind":"warning","message":"unused","option":"-Wunused","locations":[{"caret":{"file":"a.cpp","line":5,"column":7}}],"children":[]}]`
+
+		diags, err := parser.Parse("", stderr)
+		if err != nil {
+			t.Fatalf("Parse() returned error: %v", err)
+		}
+		if len(diags) != 1 {
+			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
+		}
+		assertDiagField(t, "Message", diags[0].Message, "unused")
+	})
 }
 
 func TestMapGCCSeverity(t *testing.T) {
