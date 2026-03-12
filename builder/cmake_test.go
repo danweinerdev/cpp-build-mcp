@@ -347,8 +347,7 @@ func TestBuildBuildArgs(t *testing.T) {
 
 		assertContainsSequence(t, args, "--parallel", "1")
 		assertNotContains(t, args, "8")
-		assertContains(t, args, "-k")
-		assertContains(t, args, "0")
+		assertContainsSequence(t, args, "-k", "0")
 	})
 
 	t.Run("dirty flag adds clean-first and clears", func(t *testing.T) {

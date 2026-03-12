@@ -19,7 +19,7 @@ type Config struct {
 	BuildDir              string        `json:"build_dir"`
 	SourceDir             string        `json:"source_dir"`
 	Toolchain             string        `json:"toolchain"`              // "auto", "clang", "gcc", "msvc"
-	Generator             string        `json:"generator"`              // "ninja", "make"
+	Generator             string        `json:"generator"`              // "ninja", "make", "plain-make"
 	Preset                string        `json:"preset"`                 // CMake preset name (empty = no preset)
 	CMakeArgs             []string      `json:"cmake_args"`
 	// BuildTimeout is stored as time.Duration internally. Note: marshaling Config

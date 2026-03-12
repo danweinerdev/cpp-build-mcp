@@ -35,7 +35,7 @@ type ProgressFunc func(current, total int, message string)
 var ninjaProgressRe = regexp.MustCompile(`^\[(\d+)/(\d+)\]`)
 
 // CMakeBuilder implements the Builder interface using CMake as the meta-build
-// system. It supports Ninja as the build tool (make support is planned).
+// system. It supports Ninja and Unix Makefiles generators.
 type CMakeBuilder struct {
 	cfg                 *config.Config
 	dirty               bool
@@ -376,9 +376,6 @@ func generatorCMakeName(gen string) string {
 	case "ninja", "":
 		return "Ninja"
 	case "make":
-		// Note: NewBuilder routes Generator=="make" to MakeBuilder, so this
-		// branch is not reachable via CMakeBuilder in production. It exists
-		// for completeness and forward-compatibility.
 		return "Unix Makefiles"
 	default:
 		return gen
