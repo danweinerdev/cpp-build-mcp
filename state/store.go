@@ -179,6 +179,19 @@ func (s *Store) Health() string {
 	}
 }
 
+// SetConfigureDiagnostics stores diagnostics from a failed configure step
+// without changing the build phase or build-in-progress state. This allows
+// get_errors to return cmake configure errors without falsely advancing the
+// project to PhaseConfigured.
+func (s *Store) SetConfigureDiagnostics(errs, warns []diagnostics.Diagnostic) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.Errors = errs
+	s.state.Warnings = warns
+	s.state.ErrorCount = len(errs)
+	s.state.WarningCount = len(warns)
+}
+
 // SetClean resets the build state to PhaseConfigured and clears all
 // diagnostics and counts. It does NOT clear the Dirty flag — Dirty is
 // managed independently via SetDirty/ClearDirty.

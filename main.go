@@ -703,10 +703,7 @@ func runConfigureStep(ctx context.Context, inst *configInstance, extraArgs []str
 				warns = append(warns, d)
 			}
 		}
-		inst.store.SetConfigured() // must be configured to call FinishBuild
-		if err := inst.store.StartBuild(); err == nil {
-			inst.store.FinishBuild(result.ExitCode, result.Duration, errs, warns)
-		}
+		inst.store.SetConfigureDiagnostics(errs, warns)
 	}
 
 	return configureStepResult{

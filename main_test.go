@@ -3196,6 +3196,38 @@ func TestBuildReconfigureConfigureFailure(t *testing.T) {
 	}
 }
 
+func TestBuildReconfigureFailureDoesNotAdvancePhase(t *testing.T) {
+	fb := &fakeBuilder{
+		configureResult: &builder.BuildResult{ExitCode: 1, Duration: time.Second},
+		buildResult:     &builder.BuildResult{ExitCode: 0, Duration: time.Second},
+	}
+	srv, store := newTestServer(fb)
+	// Project starts unconfigured — do NOT call SetConfigured.
+
+	req := makeCallToolRequest(map[string]interface{}{
+		"reconfigure": true,
+	})
+	result, err := srv.handleBuild(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(t, result))
+	}
+
+	// Configure failed, so the project must still be unconfigured.
+	if store.GetPhase() != state.PhaseUnconfigured {
+		t.Fatalf("expected PhaseUnconfigured after configure failure, got %d", store.GetPhase())
+	}
+
+	// A subsequent build without reconfigure should fail.
+	req2 := makeCallToolRequest(nil)
+	result2, _ := srv.handleBuild(context.Background(), req2)
+	if !result2.IsError {
+		t.Fatal("expected build to fail on unconfigured project after configure failure")
+	}
+}
+
 func TestBuildReconfigurePassesCMakeArgs(t *testing.T) {
 	fb := &fakeBuilder{
 		buildResult: &builder.BuildResult{ExitCode: 0, Duration: time.Second},

@@ -373,6 +373,74 @@ func TestSetCleanDoesNotClearDirty(t *testing.T) {
 	}
 }
 
+func TestSetConfigureDiagnosticsStoresDiagnostics(t *testing.T) {
+	s := NewStore()
+	errs := []diagnostics.Diagnostic{
+		{File: "CMakeLists.txt", Line: 5, Severity: diagnostics.SeverityError, Message: "unknown command"},
+	}
+	warns := []diagnostics.Diagnostic{
+		{File: "CMakeLists.txt", Line: 3, Severity: diagnostics.SeverityWarning, Message: "deprecated"},
+	}
+
+	s.SetConfigureDiagnostics(errs, warns)
+
+	gotErrs := s.Errors()
+	if len(gotErrs) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(gotErrs))
+	}
+	if gotErrs[0].Message != "unknown command" {
+		t.Fatalf("expected 'unknown command', got %q", gotErrs[0].Message)
+	}
+
+	gotWarns := s.Warnings()
+	if len(gotWarns) != 1 {
+		t.Fatalf("expected 1 warning, got %d", len(gotWarns))
+	}
+}
+
+func TestSetConfigureDiagnosticsDoesNotAdvancePhase(t *testing.T) {
+	s := NewStore()
+	// Phase starts at PhaseUnconfigured.
+	if s.GetPhase() != PhaseUnconfigured {
+		t.Fatalf("expected PhaseUnconfigured, got %d", s.GetPhase())
+	}
+
+	errs := []diagnostics.Diagnostic{
+		{File: "CMakeLists.txt", Line: 1, Severity: diagnostics.SeverityError, Message: "fail"},
+	}
+	s.SetConfigureDiagnostics(errs, nil)
+
+	// Phase must still be PhaseUnconfigured — configure failure should NOT
+	// advance the state.
+	if s.GetPhase() != PhaseUnconfigured {
+		t.Fatalf("expected PhaseUnconfigured after configure failure, got %d", s.GetPhase())
+	}
+
+	// build should still fail because project is unconfigured.
+	if err := s.StartBuild(); err == nil {
+		t.Fatal("expected StartBuild to fail on unconfigured project after configure failure")
+	}
+}
+
+func TestSetConfigureDiagnosticsPreservesExistingPhase(t *testing.T) {
+	s := NewStore()
+	s.SetConfigured()
+	if err := s.StartBuild(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s.FinishBuild(0, time.Second, nil, nil)
+
+	// Now at PhaseBuilt. A reconfigure failure should preserve PhaseBuilt.
+	errs := []diagnostics.Diagnostic{
+		{File: "CMakeLists.txt", Line: 1, Severity: diagnostics.SeverityError, Message: "fail"},
+	}
+	s.SetConfigureDiagnostics(errs, nil)
+
+	if s.GetPhase() != PhaseBuilt {
+		t.Fatalf("expected PhaseBuilt preserved after reconfigure failure, got %d", s.GetPhase())
+	}
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	s := NewStore()
 	s.SetConfigured()
