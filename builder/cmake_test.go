@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -308,7 +309,7 @@ func TestBuildBuildArgs(t *testing.T) {
 		args := b.buildBuildArgs(nil, 0)
 
 		assertContainsSequence(t, args, "--build", "build")
-		assertContains(t, args, "--")
+		assertNotContains(t, args, "--")
 		assertNotContains(t, args, "--clean-first")
 	})
 
@@ -332,7 +333,7 @@ func TestBuildBuildArgs(t *testing.T) {
 		b := NewCMakeBuilder(cfg)
 		args := b.buildBuildArgs(nil, 4)
 
-		assertContains(t, args, "-j4")
+		assertContainsSequence(t, args, "--parallel", "4")
 	})
 
 	t.Run("diagnostic serial build forces j1", func(t *testing.T) {
@@ -344,8 +345,8 @@ func TestBuildBuildArgs(t *testing.T) {
 		b := NewCMakeBuilder(cfg)
 		args := b.buildBuildArgs(nil, 8)
 
-		assertContains(t, args, "-j1")
-		assertNotContains(t, args, "-j8")
+		assertContainsSequence(t, args, "--parallel", "1")
+		assertNotContains(t, args, "8")
 		assertContains(t, args, "-k")
 		assertContains(t, args, "0")
 	})
@@ -370,7 +371,7 @@ func TestBuildBuildArgs(t *testing.T) {
 		assertNotContains(t, args2, "--clean-first")
 	})
 
-	t.Run("separator comes before jobs", func(t *testing.T) {
+	t.Run("non-serial build uses --parallel without separator", func(t *testing.T) {
 		cfg := &config.Config{
 			BuildDir:     "build",
 			BuildTimeout: 5 * time.Minute,
@@ -378,18 +379,69 @@ func TestBuildBuildArgs(t *testing.T) {
 		b := NewCMakeBuilder(cfg)
 		args := b.buildBuildArgs(nil, 4)
 
+		assertContains(t, args, "--parallel")
+		assertNotContains(t, args, "--")
+	})
+
+	t.Run("serial build has --parallel before separator", func(t *testing.T) {
+		cfg := &config.Config{
+			BuildDir:              "build",
+			BuildTimeout:          5 * time.Minute,
+			DiagnosticSerialBuild: true,
+		}
+		b := NewCMakeBuilder(cfg)
+		args := b.buildBuildArgs(nil, 4)
+
+		parallelIdx := indexOf(args, "--parallel")
 		sepIdx := indexOf(args, "--")
-		jobIdx := indexOf(args, "-j4")
+		if parallelIdx < 0 {
+			t.Fatal("expected --parallel in args")
+		}
 		if sepIdx < 0 {
 			t.Fatal("expected -- separator in args")
 		}
-		if jobIdx < 0 {
-			t.Fatal("expected -j4 in args")
-		}
-		if sepIdx >= jobIdx {
-			t.Fatalf("-- (index %d) should appear before -j4 (index %d)", sepIdx, jobIdx)
+		if parallelIdx >= sepIdx {
+			t.Fatalf("--parallel (index %d) should appear before -- (index %d)", parallelIdx, sepIdx)
 		}
 	})
+
+	t.Run("make generator with diagnostic serial build", func(t *testing.T) {
+		cfg := &config.Config{
+			BuildDir:              "build",
+			BuildTimeout:          5 * time.Minute,
+			Generator:             "make",
+			DiagnosticSerialBuild: true,
+		}
+		b := NewCMakeBuilder(cfg)
+		args := b.buildBuildArgs(nil, 4)
+
+		assertContainsSequence(t, args, "--parallel", "1")
+		assertContains(t, args, "--")
+		assertContains(t, args, "-k")
+		// make's -k does not take a "0" argument
+		assertNotContains(t, args, "0")
+	})
+}
+
+func TestNativeKeepGoingFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		gen  string
+		want []string
+	}{
+		{"ninja", "ninja", []string{"-k", "0"}},
+		{"empty defaults to ninja", "", []string{"-k", "0"}},
+		{"make", "make", []string{"-k"}},
+		{"unknown returns nil", "msbuild", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := nativeKeepGoingFlags(tt.gen)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("nativeKeepGoingFlags(%q) = %v, want %v", tt.gen, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestBuildCleanArgs(t *testing.T) {

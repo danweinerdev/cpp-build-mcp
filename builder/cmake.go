@@ -350,6 +350,21 @@ func parseTargetList(stdout string) []TargetInfo {
 	return targets
 }
 
+// nativeKeepGoingFlags returns the generator-specific "keep going" flags
+// passed after -- to the native build tool. When DiagnosticSerialBuild is
+// enabled, these flags tell the build tool to continue past the first error
+// so all diagnostics are collected.
+func nativeKeepGoingFlags(gen string) []string {
+	switch gen {
+	case "ninja", "":
+		return []string{"-k", "0"}
+	case "make":
+		return []string{"-k"}
+	default:
+		return nil
+	}
+}
+
 // generatorCMakeName maps a normalized generator name (as stored in
 // Config.Generator) to the full name that cmake's -G flag expects.
 //   - "ninja" -> "Ninja"
@@ -421,16 +436,17 @@ func (b *CMakeBuilder) buildBuildArgs(targets []string, jobs int) []string {
 		args = append(args, "--target", t)
 	}
 
-	args = append(args, "--")
-
 	if b.cfg.DiagnosticSerialBuild {
 		jobs = 1
-		// Keep going despite failures so diagnostic output is collected from
-		// all translation units, not just the first one that fails.
-		args = append(args, "-k", "0")
 	}
 	if jobs > 0 {
-		args = append(args, fmt.Sprintf("-j%d", jobs))
+		args = append(args, "--parallel", strconv.Itoa(jobs))
+	}
+	if b.cfg.DiagnosticSerialBuild {
+		if flags := nativeKeepGoingFlags(b.cfg.Generator); len(flags) > 0 {
+			args = append(args, "--")
+			args = append(args, flags...)
+		}
 	}
 
 	return args
