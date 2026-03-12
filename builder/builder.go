@@ -44,8 +44,10 @@ func NewBuilder(cfg *config.Config) (Builder, error) {
 	case "ninja", "":
 		return NewCMakeBuilder(cfg), nil
 	case "make":
+		return NewCMakeBuilder(cfg), nil
+	case "plain-make":
 		return NewMakeBuilder(cfg), nil
 	default:
-		return nil, fmt.Errorf("unsupported generator: %s (supported: ninja, make)", cfg.Generator)
+		return nil, fmt.Errorf("unsupported generator: %s (supported: ninja, make, plain-make)", cfg.Generator)
 	}
 }

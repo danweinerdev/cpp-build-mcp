@@ -40,8 +40,19 @@ func TestNewBuilderFactory(t *testing.T) {
 		}
 	})
 
-	t.Run("make returns MakeBuilder", func(t *testing.T) {
+	t.Run("make returns CMakeBuilder", func(t *testing.T) {
 		cfg := &config.Config{Generator: "make"}
+		b, err := NewBuilder(cfg)
+		if err != nil {
+			t.Fatalf("NewBuilder() returned error: %v", err)
+		}
+		if _, ok := b.(*CMakeBuilder); !ok {
+			t.Fatalf("expected *CMakeBuilder, got %T", b)
+		}
+	})
+
+	t.Run("plain-make returns MakeBuilder", func(t *testing.T) {
+		cfg := &config.Config{Generator: "plain-make"}
 		b, err := NewBuilder(cfg)
 		if err != nil {
 			t.Fatalf("NewBuilder() returned error: %v", err)
@@ -59,6 +70,9 @@ func TestNewBuilderFactory(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "unsupported generator") {
 			t.Fatalf("unexpected error message: %v", err)
+		}
+		if !strings.Contains(err.Error(), "plain-make") {
+			t.Fatalf("error message should mention plain-make: %v", err)
 		}
 	})
 }

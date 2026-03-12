@@ -243,8 +243,8 @@ func TestMakeBuilderConfigureIsNoop(t *testing.T) {
 	}
 }
 
-func TestNewBuilderMake(t *testing.T) {
-	cfg := &config.Config{Generator: "make"}
+func TestNewBuilderPlainMake(t *testing.T) {
+	cfg := &config.Config{Generator: "plain-make"}
 	b, err := NewBuilder(cfg)
 	if err != nil {
 		t.Fatalf("NewBuilder() returned error: %v", err)
